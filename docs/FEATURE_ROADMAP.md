@@ -1,6 +1,6 @@
 # Goravel VS Code Extension — Feature Analysis & Implementation Roadmap
 
-This document tracks the analysis of existing capabilities and implemented enhancements (**P0–P4**) for `goravel-vscode-extension`.
+This document tracks the analysis of existing capabilities and implemented enhancements (**P0–P6**) for `goravel-vscode-extension`.
 
 ---
 
@@ -157,6 +157,48 @@ This document tracks the analysis of existing capabilities and implemented enhan
 
 ---
 
+### P6 — Deep `facades.View` & `.tmpl` Intelligence (`P6.1`–`P6.12`)
+
+- [x] **P6.1: Custom `template.FuncMap` Indexing & LSP (`config/http.go` + Service Providers)**
+  - Indexed custom `template.FuncMap{...}` functions (`Name`, `Signature`, `Params`, `ReturnType`, `MinArgs`, `Variadic`, `Loc`) in `Catalog.TemplateFuncs`.
+  - Added pipe `|` priority completion, hover signature & file:line, go-to-definition (`config/http.go`), and unknown/under-applied function diagnostics in `.tmpl` files.
+  - *Files:* `server/internal/indexer/schema.go`, `server/internal/indexer/extras.go`, `server/internal/framework/views.go`.
+- [x] **P6.2: Route Closures & `RouteItem.View` Linkage**
+  - Linked anonymous `facades.Route().Get("/path", func(ctx http.Context) http.Response { ... })` closures and controller handlers rendering views to `RouteItem.View` and `ViewCaller.Route`.
+  - *Files:* `server/internal/indexer/routes.go`, `server/internal/indexer/extras.go`, `server/internal/indexer/schema.go`.
+- [x] **P6.3: Go Data Map Key Completion, Missing Variable Diagnostics & "Fill Missing Template Variables" Code Action**
+  - Added autocompletion for expected `.tmpl` variable keys inside `View().Make("...", map[string]any{ "|" })`, hints for missing variables, and a Quick Fix to auto-fill missing template variables into the Go map literal.
+  - *Files:* `server/internal/framework/views.go`.
+- [x] **P6.4: `.tmpl` Unpassed / Mismatched Variable Diagnostics & Quick Fixes**
+  - Detected `.var` references in `.tmpl` not passed by callers/shared vars, with Levenshtein/case-insensitive fuzzy matching (e.g. `.supabaseUrl` → `.supabase_url`) and Quick Fixes to rename the variable or insert the key into the controller's `View().Make` map.
+  - *Files:* `server/internal/framework/views.go`.
+- [x] **P6.5: Deep `GoType` Inference & Multi-Level `.a.b.c` Chains**
+  - Indexed structs across `app/http/responses`, `app/services`, `app/http/controllers`, and `pkg/` plus function/method return types (`Catalog.FuncReturns`), supporting arbitrary-depth `.profile.User.Email` completion, hover, and go-to-definition.
+  - *Files:* `server/internal/indexer/models.go`, `server/internal/indexer/extras.go`, `server/internal/framework/views.go`.
+- [x] **P6.6: Multi-Hop Template DAG, Multi-`define` & Scoped `with`/`range` Context**
+  - Upgraded `propagateTemplateHierarchy` to a multi-hop fixed-point loop, indexed multiple `{{ define }}` blocks per file, supported sub-field context rebinding (`{{ template "sub" .user }}`), and resolved scoped `.Field` vs root `$.var` inside `{{ with }}` and `{{ range }}` blocks.
+  - *Files:* `server/internal/indexer/extras.go`, `server/internal/framework/views.go`.
+- [x] **P6.7: Empty `.tmpl` & Orphaned View Detection + Scaffolding Quick Fixes**
+  - Flagged empty `.tmpl` files with a Quick Fix to scaffold `{{ define "<view>" }}`, and added an unreferenced/orphaned view CodeLens indicator for templates with 0 callers and 0 parent includes.
+  - *Files:* `server/internal/framework/views.go`.
+- [x] **P6.8: Local Map Mutation Tracking, Direct Struct Context & `GetShared()`/`RegisteredViews()` Hover**
+  - Tracked `data["key"] = val` mutations on local map variables, supported passing a struct directly to `View().Make("view", structVal)`, and added hover previews on `facades.View().GetShared()` and `facades.View().RegisteredViews()`.
+  - *Files:* `server/internal/indexer/extras.go`, `server/internal/framework/views.go`.
+- [x] **P6.9: HTML Route URL (`href`, `action`, `fetch`) & `public/` Static Asset Intelligence in `.tmpl`**
+  - Added route URL and `public/` static asset completion, hover, go-to-definition, and broken static asset diagnostics inside `.tmpl` HTML attributes and JS `fetch`/`axios` calls.
+  - *Files:* `server/internal/framework/views.go`.
+- [x] **P6.10: `.tmpl` `DocumentSymbol`, `InlayHint`, TextMate Injections & Alpine.js Support**
+  - Added `textDocument/documentSymbol` and `textDocument/inlayHint` for `.tmpl` files, removed the conflicting `"meta.embedded.block.goravel-tmpl": "go"` grammar mapping, injected `#tmpl-action` into `<script>`, `<style>`, and HTML attributes, and added Alpine.js directive highlighting & snippets.
+  - *Files:* `server/internal/framework/views.go`, `server/internal/lsp/server.go`, `package.json`, `syntaxes/goravel-tmpl.tmLanguage.json`, `snippets/goravel-tmpl.code-snippets`.
+- [x] **P6.11: Sidebar "Views & Templates" TreeView & Route Matrix View Column**
+  - Added `ViewsTreeProvider` (`goravel.views.templates`) showing App Views, Package Views, Shared Variables (`View().Share`), and Custom `FuncMap` Functions, and added a `View` column to the Route Matrix webview and Routes TreeView.
+  - *Files:* `package.json`, `client/src/views/explorers.ts`, `client/src/extension.ts`, `server/internal/lsp/server.go`.
+- [x] **P6.12: Folder-Aware `make:view` with Layout Picker**
+  - Enhanced `goravel.artisan.makeView` to pre-fill the subfolder path from the Explorer context URI and offer a QuickPick for layout scaffolding (`Page with Header & Footer Partials`, `Standalone {{ define }} Block`, or `artisan make:view` CLI).
+  - *Files:* `client/src/commands/artisan.ts`, `package.json`.
+
+---
+
 ## 3. Verification & Test Suite
 
 - **Go LSP Unit Tests:** `server/internal/lsp/features_test.go` (`npm run test:server`)
@@ -165,4 +207,5 @@ This document tracks the analysis of existing capabilities and implemented enhan
   - `TestSanitizeSQLPlaceholdersAndERDiagramAndRename` — Verifies `SanitizeSQLPlaceholders` (`$1`, `?`, `@p1`), `goravel/erDiagram` Mermaid output, and workspace-wide `textDocument/rename`.
   - `TestP4LiveMigrationsObserversTemplatesGrpcAndSwagger` — Verifies live migration `applied` (with batch number) vs `pending` status (`P4.1`), Observer & Scope indexing + Model CodeLens (`P4.2`), `.tmpl` template variable completion/hover/definition (`P4.3`), gRPC controller & `.proto` route indexing (`P4.4`), and full Swagger/OpenAPI annotation Code Action generation (`P4.5`).
   - `TestP5ViewFacadeAndTemplateLSP` — Verifies `facades.View().LoadViewsFrom(...)` & app view override precedence, `Exists`/`First`/`Share`/`Shared` intelligence, sub-template context propagation, `.tmpl` completion (partials, nested model fields, local `$vars`, shared vars, keywords), `.tmpl` diagnostics/Quick Fixes/CodeLens, and cross-file Rename between Go controllers and `.tmpl` files (`P5.1`–`P5.4`).
+  - `TestP6ViewAndTemplateEnhancements` — Verifies custom `template.FuncMap` indexing/hover/definition (`P6.1`), route closure `RouteItem.View` linkage (`P6.2`), Go `View().Make` data map key completion & "Fill missing template variables" Quick Fix (`P6.3`), `.tmpl` unpassed variable fuzzy-match diagnostics (`.supabaseUrl` → `.supabase_url`) (`P6.4`), deep `GoType` inference via service return types & multi-level `.profile.User.Email` navigation (`P6.5`), multi-hop `UsedVars` propagation & scoped `{{ with .profile }}` `.Bio` resolution (`P6.6`), empty `.tmpl` Quick Fix & orphaned view CodeLens (`P6.7`), `data["mutated_key"]` tracking & `GetShared()` hover (`P6.8`), HTML `href="/signin"` route intelligence & `public/` missing static asset diagnostics (`P6.9`), and `TemplateDocumentSymbols` (`P6.10`).
 - **Client Typecheck & Bundle:** `npm run typecheck && npm run build`

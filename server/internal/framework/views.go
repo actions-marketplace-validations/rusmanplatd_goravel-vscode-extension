@@ -22,10 +22,12 @@ type viewNameSpan struct {
 }
 
 type viewCall struct {
-	Method   string // Make | First | Exists | PathView | Share | Shared | LoadViewsFrom
-	Names    []viewNameSpan
-	ShareKey *viewNameSpan
-	DataMap  *ast.CompositeLit
+	Method      string // Make | First | Exists | PathView | Share | Shared | LoadViewsFrom | GetShared | RegisteredViews
+	Names       []viewNameSpan
+	ShareKey    *viewNameSpan
+	DataMap     *ast.CompositeLit
+	MethodStart int
+	MethodEnd   int
 }
 
 func findViewCalls(path, src string) ([]viewCall, *token.FileSet) {
@@ -64,20 +66,24 @@ func findViewCalls(path, src string) ([]viewCall, *token.FileSet) {
 	var out []viewCall
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || len(call.Args) == 0 {
+		if !ok {
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
+		mStart := fset.Position(sel.Sel.Pos()).Offset
+		mEnd := fset.Position(sel.Sel.End()).Offset
 
 		// Check path.View("...")
-		if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "path" && sel.Sel.Name == "View" {
+		if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "path" && sel.Sel.Name == "View" && len(call.Args) > 0 {
 			if sp, ok := extractStringSpan(fset, call.Args[0]); ok {
 				out = append(out, viewCall{
-					Method: "PathView",
-					Names:  []viewNameSpan{sp},
+					Method:      "PathView",
+					Names:       []viewNameSpan{sp},
+					MethodStart: mStart,
+					MethodEnd:   mEnd,
 				})
 			}
 			return true
@@ -89,30 +95,48 @@ func findViewCalls(path, src string) ([]viewCall, *token.FileSet) {
 			return true
 		}
 		recvText := src[recvStart:recvEnd]
-		if !strings.Contains(recvText, "View") && !strings.Contains( strings.ToLower(recvText), "view") {
+		if !strings.Contains(recvText, "View") && !strings.Contains(strings.ToLower(recvText), "view") {
 			return true
 		}
 
 		switch sel.Sel.Name {
+		case "GetShared", "RegisteredViews":
+			out = append(out, viewCall{
+				Method:      sel.Sel.Name,
+				MethodStart: mStart,
+				MethodEnd:   mEnd,
+			})
 		case "Make":
+			if len(call.Args) == 0 {
+				return true
+			}
 			sp, ok := extractStringSpan(fset, call.Args[0])
 			if !ok {
 				return true
 			}
 			vc := viewCall{
-				Method: "Make",
-				Names:  []viewNameSpan{sp},
+				Method:      "Make",
+				Names:       []viewNameSpan{sp},
+				MethodStart: mStart,
+				MethodEnd:   mEnd,
 			}
 			if len(call.Args) > 1 {
 				vc.DataMap = resolveDataMapArg(call.Args[1], localMaps)
 			}
 			out = append(out, vc)
 		case "First":
+			if len(call.Args) == 0 {
+				return true
+			}
 			sliceLit, ok := call.Args[0].(*ast.CompositeLit)
 			if !ok {
 				return true
 			}
-			vc := viewCall{Method: "First"}
+			vc := viewCall{
+				Method:      "First",
+				MethodStart: mStart,
+				MethodEnd:   mEnd,
+			}
 			for _, elt := range sliceLit.Elts {
 				if sp, ok := extractStringSpan(fset, elt); ok {
 					vc.Names = append(vc.Names, sp)
@@ -125,24 +149,39 @@ func findViewCalls(path, src string) ([]viewCall, *token.FileSet) {
 				out = append(out, vc)
 			}
 		case "Exists":
+			if len(call.Args) == 0 {
+				return true
+			}
 			if sp, ok := extractStringSpan(fset, call.Args[0]); ok {
 				out = append(out, viewCall{
-					Method: "Exists",
-					Names:  []viewNameSpan{sp},
+					Method:      "Exists",
+					Names:       []viewNameSpan{sp},
+					MethodStart: mStart,
+					MethodEnd:   mEnd,
 				})
 			}
 		case "Share":
+			if len(call.Args) == 0 {
+				return true
+			}
 			if sp, ok := extractStringSpan(fset, call.Args[0]); ok {
 				out = append(out, viewCall{
-					Method:   "Share",
-					ShareKey: &sp,
+					Method:      "Share",
+					ShareKey:    &sp,
+					MethodStart: mStart,
+					MethodEnd:   mEnd,
 				})
 			}
 		case "Shared":
+			if len(call.Args) == 0 {
+				return true
+			}
 			if sp, ok := extractStringSpan(fset, call.Args[0]); ok {
 				out = append(out, viewCall{
-					Method:   "Shared",
-					ShareKey: &sp,
+					Method:      "Shared",
+					ShareKey:    &sp,
+					MethodStart: mStart,
+					MethodEnd:   mEnd,
 				})
 			}
 		}
@@ -177,12 +216,12 @@ func resolveDataMapArg(expr ast.Expr, localMaps map[string]*ast.CompositeLit) *a
 	return nil
 }
 
-// ViewCompletions suggests template paths inside View().Make/First/Exists/path.View and shared keys inside View().Shared/Share.
+// ViewCompletions suggests template paths inside View().Make/First/Exists/path.View, shared keys inside View().Shared/Share, and expected .tmpl variable keys inside View().Make data maps.
 func ViewCompletions(path, src string, cat *indexer.Catalog, goOff int) []CompItem {
 	if cat == nil {
 		return nil
 	}
-	calls, _ := findViewCalls(path, src)
+	calls, fset := findViewCalls(path, src)
 	for _, vc := range calls {
 		for _, ns := range vc.Names {
 			if goOff >= ns.Start && goOff <= ns.End {
@@ -236,6 +275,54 @@ func ViewCompletions(path, src string, cat *indexer.Catalog, goOff int) []CompIt
 				})
 			}
 			return out
+		}
+		// Data map key completion inside View().Make("view.tmpl", map[string]any{ "|" })
+		if vc.DataMap != nil && fset != nil && len(vc.Names) > 0 {
+			lbrace := fset.Position(vc.DataMap.Lbrace).Offset
+			rbrace := fset.Position(vc.DataMap.Rbrace).Offset
+			if goOff >= lbrace && goOff <= rbrace {
+				var targetVi *indexer.ViewItem
+				for _, ns := range vc.Names {
+					if vi := cat.LookupView(ns.Name); vi != nil {
+						targetVi = vi
+						break
+					}
+				}
+				if targetVi != nil && len(targetVi.UsedVars) > 0 {
+					existing := map[string]bool{}
+					for _, elt := range vc.DataMap.Elts {
+						if kv, ok := elt.(*ast.KeyValueExpr); ok {
+							if sp, ok := extractStringSpan(fset, kv.Key); ok && (goOff < sp.Start || goOff > sp.End) {
+								existing[sp.Name] = true
+							}
+						}
+					}
+					directSet := map[string]bool{}
+					for _, dv := range targetVi.DirectVars {
+						directSet[dv] = true
+					}
+					var out []CompItem
+					for _, uv := range targetVi.UsedVars {
+						if existing[uv] {
+							continue
+						}
+						origin := fmt.Sprintf("referenced in %s", targetVi.Name)
+						if !directSet[uv] {
+							origin = fmt.Sprintf("referenced in partial included by %s", targetVi.Name)
+						}
+						if _, isShared := cat.SharedViewVars[uv]; isShared {
+							origin += " (also shared globally)"
+						}
+						out = append(out, CompItem{
+							Label:  uv,
+							Detail: origin,
+							Doc:    fmt.Sprintf("Template context variable `.%s` expected by `%s`", uv, targetVi.Name),
+							Kind:   5, // Field
+						})
+					}
+					return out
+				}
+			}
 		}
 	}
 	return nil
@@ -303,6 +390,41 @@ func ViewHover(path, src string, cat *indexer.Catalog, goOff int) *HoverResult {
 			if len(usedIn) > 0 {
 				sort.Strings(usedIn)
 				fmt.Fprintf(&b, "- Referenced in templates: %s\n", strings.Join(usedIn, ", "))
+			}
+			return &HoverResult{Markdown: b.String()}
+		}
+		if vc.Method == "GetShared" && goOff >= vc.MethodStart && goOff <= vc.MethodEnd {
+			var b strings.Builder
+			b.WriteString("**`facades.View().GetShared()`**\n\n")
+			if len(cat.SharedViewVars) == 0 {
+				b.WriteString("*(No global shared view variables registered via `View().Share`)*")
+			} else {
+				keys := make([]string, 0, len(cat.SharedViewVars))
+				for k := range cat.SharedViewVars {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				b.WriteString("Registered shared variables:\n")
+				for _, k := range keys {
+					vvs := cat.SharedViewVars[k]
+					if len(vvs) > 0 {
+						fmt.Fprintf(&b, "- `.%s` = `%s` (%s)\n", k, vvs[0].ValueExpr, vvs[0].Controller)
+					}
+				}
+			}
+			return &HoverResult{Markdown: b.String()}
+		}
+		if vc.Method == "RegisteredViews" && goOff >= vc.MethodStart && goOff <= vc.MethodEnd {
+			var names []string
+			for k := range cat.ViewItems {
+				names = append(names, k)
+			}
+			sort.Strings(names)
+			var b strings.Builder
+			fmt.Fprintf(&b, "**`facades.View().RegisteredViews()`** (%d templates)\n\n", len(names))
+			for _, n := range names {
+				vi := cat.ViewItems[n]
+				fmt.Fprintf(&b, "- `%s` (%s)\n", n, vi.Source)
 			}
 			return &HoverResult{Markdown: b.String()}
 		}
@@ -528,63 +650,199 @@ func checkUnusedViewDataMap(viewName string, vi *indexer.ViewItem, dataMap *ast.
 			})
 		}
 	}
+	// Also check if template expects required direct variables that were omitted from a non-empty map literal
+	if vi != nil && len(dataMap.Elts) > 0 {
+		passedKeys := map[string]bool{}
+		for _, elt := range dataMap.Elts {
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				if bl, ok := kv.Key.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+					if k, err := strconv.Unquote(bl.Value); err == nil {
+						passedKeys[k] = true
+					}
+				}
+			}
+		}
+		var missingVars []string
+		for _, uv := range vi.UsedVars {
+			if passedKeys[uv] || uv == "csrf_token" {
+				continue
+			}
+			if _, isShared := cat.SharedViewVars[uv]; isShared {
+				continue
+			}
+			missingVars = append(missingVars, "."+uv)
+		}
+		if len(missingVars) > 0 {
+			sort.Strings(missingVars)
+			out = append(out, Diag{
+				Start:    fset.Position(dataMap.Lbrace).Offset,
+				End:      fset.Position(dataMap.Lbrace).Offset + 1,
+				Severity: 4, // Hint
+				Message:  fmt.Sprintf("Template '%s' also references variable(s) not in this map: %s", viewName, strings.Join(missingVars, ", ")),
+			})
+		}
+	}
 	return out
 }
 
-// ViewCodeActions offers a Quick Fix to scaffold a missing template in resources/views/.
+// ViewCodeActions offers Quick Fixes to scaffold a missing template in resources/views/ or fill missing template variables into a View().Make data map.
 func ViewCodeActions(path, src string, cat *indexer.Catalog, goOff int) []CodeAction {
 	if cat == nil || cat.Root == "" {
 		return nil
 	}
-	calls, _ := findViewCalls(path, src)
+	calls, fset := findViewCalls(path, src)
 	var actions []CodeAction
 	for _, vc := range calls {
 		for _, ns := range vc.Names {
-			if goOff < ns.Start || goOff > ns.End {
-				continue
-			}
-			if cat.LookupView(ns.Name) != nil {
-				continue
-			}
-			if _, ok := cat.Views[ns.Name]; ok {
-				continue
-			}
-			relName := ns.Name
-			if filepath.Ext(relName) == "" {
-				relName += ".tmpl"
-			}
-			targetFile := filepath.Join(cat.Root, "resources", "views", filepath.FromSlash(relName))
-			var bodyLines []string
-			bodyLines = append(bodyLines, fmt.Sprintf("{{ define %q }}", relName))
-			bodyLines = append(bodyLines, "<div>")
-			if vc.DataMap != nil {
-				for _, elt := range vc.DataMap.Elts {
-					if kv, ok := elt.(*ast.KeyValueExpr); ok {
-						if bl, ok := kv.Key.(*ast.BasicLit); ok && bl.Kind == token.STRING {
-							if k, err := strconv.Unquote(bl.Value); err == nil && k != "" {
-								bodyLines = append(bodyLines, fmt.Sprintf("  <p>{{ .%s }}</p>", k))
+			if goOff >= ns.Start && goOff <= ns.End {
+				if cat.LookupView(ns.Name) != nil {
+					continue
+				}
+				if _, ok := cat.Views[ns.Name]; ok {
+					continue
+				}
+				relName := ns.Name
+				if filepath.Ext(relName) == "" {
+					relName += ".tmpl"
+				}
+				targetFile := filepath.Join(cat.Root, "resources", "views", filepath.FromSlash(relName))
+				var bodyLines []string
+				bodyLines = append(bodyLines, fmt.Sprintf("{{ define %q }}", relName))
+				bodyLines = append(bodyLines, "<div>")
+				if vc.DataMap != nil {
+					for _, elt := range vc.DataMap.Elts {
+						if kv, ok := elt.(*ast.KeyValueExpr); ok {
+							if bl, ok := kv.Key.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+								if k, err := strconv.Unquote(bl.Value); err == nil && k != "" {
+									bodyLines = append(bodyLines, fmt.Sprintf("  <p>{{ .%s }}</p>", k))
+								}
 							}
 						}
 					}
 				}
-			}
-			bodyLines = append(bodyLines, "</div>")
-			bodyLines = append(bodyLines, "{{ end }}\n")
-			actions = append(actions, CodeAction{
-				Title: fmt.Sprintf("Create view template 'resources/views/%s'", relName),
-				Kind:  "quickfix",
-				Edits: []TextEdit{
-					{
-						File:    targetFile,
-						Start:   0,
-						End:     0,
-						NewText: strings.Join(bodyLines, "\n"),
+				bodyLines = append(bodyLines, "</div>")
+				bodyLines = append(bodyLines, "{{ end }}\n")
+				actions = append(actions, CodeAction{
+					Title: fmt.Sprintf("Create view template 'resources/views/%s'", relName),
+					Kind:  "quickfix",
+					Edits: []TextEdit{
+						{
+							File:    targetFile,
+							Start:   0,
+							End:     0,
+							NewText: strings.Join(bodyLines, "\n"),
+						},
 					},
-				},
-			})
+				})
+			}
+		}
+
+		// Quick Fix: Fill missing template variables into View().Make / First data map
+		if vc.DataMap != nil && fset != nil && len(vc.Names) > 0 {
+			lbrace := fset.Position(vc.DataMap.Lbrace).Offset
+			rbrace := fset.Position(vc.DataMap.Rbrace).Offset
+			onCall := (goOff >= vc.Names[0].Start && goOff <= vc.Names[len(vc.Names)-1].End) || (goOff >= lbrace && goOff <= rbrace)
+			if onCall {
+				vi := cat.LookupView(vc.Names[0].Name)
+				if vi != nil && len(vi.UsedVars) > 0 {
+					passed := map[string]bool{}
+					for _, elt := range vc.DataMap.Elts {
+						if kv, ok := elt.(*ast.KeyValueExpr); ok {
+							if sp, ok := extractStringSpan(fset, kv.Key); ok {
+								passed[sp.Name] = true
+							}
+						}
+					}
+					var missing []string
+					for _, uv := range vi.UsedVars {
+						if passed[uv] || uv == "csrf_token" {
+							continue
+						}
+						if _, isShared := cat.SharedViewVars[uv]; isShared {
+							continue
+						}
+						missing = append(missing, uv)
+					}
+					if len(missing) > 0 {
+						sort.Strings(missing)
+						var ins strings.Builder
+						for _, mKey := range missing {
+							fmt.Fprintf(&ins, "\n\t\t%q: \"\",", mKey)
+						}
+						actions = append(actions, CodeAction{
+							Title: fmt.Sprintf("Fill missing template variables (%s)", strings.Join(missing, ", ")),
+							Kind:  "quickfix",
+							Edits: []TextEdit{
+								{
+									File:    path,
+									Start:   lbrace + 1,
+									End:     lbrace + 1,
+									NewText: ins.String(),
+								},
+							},
+						})
+					}
+				}
+			}
 		}
 	}
 	return actions
+}
+
+// InlayHintItem represents an inline editor hint at a byte offset.
+type InlayHintItem struct {
+	Offset int
+	Label  string
+}
+
+// ViewInlayHints returns inlay hints on View().Make calls in Go files when a template has unpassed variables or overrides a package view.
+func ViewInlayHints(path, src string, cat *indexer.Catalog) []InlayHintItem {
+	if cat == nil {
+		return nil
+	}
+	calls, fset := findViewCalls(path, src)
+	var hints []InlayHintItem
+	for _, vc := range calls {
+		if vc.Method != "Make" || len(vc.Names) == 0 {
+			continue
+		}
+		ns := vc.Names[0]
+		vi := cat.LookupView(ns.Name)
+		if vi == nil {
+			continue
+		}
+		if len(vi.PackageLocs) > 0 {
+			hints = append(hints, InlayHintItem{
+				Offset: ns.End,
+				Label:  " [overrides package view]",
+			})
+		}
+		if vc.DataMap != nil && fset != nil && len(vi.UsedVars) > 0 {
+			passed := map[string]bool{}
+			for _, elt := range vc.DataMap.Elts {
+				if kv, ok := elt.(*ast.KeyValueExpr); ok {
+					if sp, ok := extractStringSpan(fset, kv.Key); ok {
+						passed[sp.Name] = true
+					}
+				}
+			}
+			var missing []string
+			for _, uv := range vi.UsedVars {
+				if !passed[uv] && uv != "csrf_token" {
+					if _, isShared := cat.SharedViewVars[uv]; !isShared {
+						missing = append(missing, "."+uv)
+					}
+				}
+			}
+			if len(missing) > 0 && len(missing) <= 4 {
+				hints = append(hints, InlayHintItem{
+					Offset: ns.End,
+					Label:  fmt.Sprintf(" (missing: %s)", strings.Join(missing, ", ")),
+				})
+			}
+		}
+	}
+	return hints
 }
 
 // IsTemplateFile reports whether path is an HTML/Go template file.
@@ -674,8 +932,12 @@ func currentTemplateActionPrefix(src string, off int) string {
 
 var (
 	includeCompletionPrefixRe = regexp.MustCompile(`^\s*(?:template|block)\s+"([^"]*)$`)
-	nestedFieldPrefixRe       = regexp.MustCompile(`(?:^|[\s(|,=])(\$?[A-Za-z_][A-Za-z0-9_]*|\.?[A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z0-9_]*)$`)
+	nestedFieldPrefixRe       = regexp.MustCompile(`(?:^|[\s(|,=])(\$?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*|\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.([A-Za-z0-9_]*)$`)
+	pipePrefixRe              = regexp.MustCompile(`\|\s*[A-Za-z0-9_]*$`)
 	localVarDeclRe            = regexp.MustCompile(`\{\{-?\s*(?:range\s+|with\s+|if\s+)?(\$[A-Za-z_][A-Za-z0-9_]*)(?:\s*,\s*(\$[A-Za-z_][A-Za-z0-9_]*))?\s*:=\s*([^}\n]+?)\s*-?\}\}`)
+	htmlRouteAttrPrefixRe     = regexp.MustCompile(`(?i)(?:href|action|hx-get|hx-post|hx-put|hx-delete|hx-patch)\s*=\s*["'](/[^"'{}]*)?$`)
+	jsFetchRoutePrefixRe      = regexp.MustCompile(`(?i)(?:fetch|axios\.(?:get|post|put|patch|delete))\s*\(\s*["'\x60](/[^"'\x60{}]*)?$`)
+	htmlAssetAttrPrefixRe     = regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["'](/[^"'{}]*)?$`)
 )
 
 type localTemplateVar struct {
@@ -692,14 +954,13 @@ func extractLocalTemplateVars(src string, limitOff int, vars []indexer.ViewVar, 
 	var out []localTemplateVar
 	seen := map[string]bool{}
 	for _, m := range localVarDeclRe.FindAllStringSubmatchIndex(src[:limitOff], -1) {
+		actText := src[m[0]:m[1]]
+		isRange := strings.Contains(actText, "range ")
 		rhs := strings.TrimSpace(src[m[6]:m[7]])
 		rhsField := strings.TrimPrefix(strings.TrimPrefix(rhs, "$."), ".")
-		inferredType := ""
-		for _, vv := range vars {
-			if vv.Key == rhsField && vv.GoType != "" {
-				inferredType = vv.GoType
-				break
-			}
+		inferredType := resolveExprChainGoType(rhsField, "", vars, out, cat)
+		if isRange {
+			inferredType = strings.TrimPrefix(inferredType, "[]")
 		}
 		if m[4] >= 0 && m[5] >= 0 {
 			// range $idx, $item := .items
@@ -721,8 +982,150 @@ func extractLocalTemplateVars(src string, limitOff int, vars []indexer.ViewVar, 
 			}
 		}
 	}
-	_ = cat
 	return out
+}
+
+// resolveScopedDotGoType determines if off is inside an active {{ range .items }} or {{ with .user }} block that rebinds `.`.
+func resolveScopedDotGoType(src string, off int, vars []indexer.ViewVar, locals []localTemplateVar, cat *indexer.Catalog) string {
+	if off > len(src) {
+		off = len(src)
+	}
+	type scopeFrame struct {
+		kw      string
+		dotType string
+	}
+	var stack []scopeFrame
+	matches := regexp.MustCompile(`(?s)\{\{-?(.*?)-?\}\}`).FindAllStringSubmatchIndex(src[:off], -1)
+	for _, m := range matches {
+		body := strings.TrimSpace(src[m[2]:m[3]])
+		if strings.HasPrefix(body, "/*") {
+			continue
+		}
+		if bm := blockOpenKeywordRe.FindStringSubmatch(body); bm != nil {
+			kw := bm[1]
+			dotType := ""
+			if kw == "range" || kw == "with" {
+				rest := strings.TrimSpace(body[len(kw):])
+				if idx := strings.Index(rest, ":="); idx >= 0 {
+					rest = strings.TrimSpace(rest[idx+2:])
+				}
+				fields := strings.Fields(rest)
+				if len(fields) > 0 {
+					expr := fields[0]
+					curDot := ""
+					if len(stack) > 0 {
+						curDot = stack[len(stack)-1].dotType
+					}
+					dotType = resolveExprChainGoType(expr, curDot, vars, locals, cat)
+					if kw == "range" {
+						dotType = strings.TrimPrefix(dotType, "[]")
+					}
+				}
+			} else if len(stack) > 0 {
+				dotType = stack[len(stack)-1].dotType
+			}
+			stack = append(stack, scopeFrame{kw: kw, dotType: dotType})
+		} else if blockEndKeywordRe.MatchString(body) {
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i].dotType != "" {
+			return stack[i].dotType
+		}
+	}
+	return ""
+}
+
+// resolveExprChainGoType resolves a single or multi-segment chain like ".profile.User" or "$u.Province" to its Go struct/model type.
+func resolveExprChainGoType(chainExpr, scopedDotType string, vars []indexer.ViewVar, locals []localTemplateVar, cat *indexer.Catalog) string {
+	if chainExpr == "" {
+		return ""
+	}
+	isRootDollar := strings.HasPrefix(chainExpr, "$.")
+	clean := strings.TrimPrefix(strings.TrimPrefix(chainExpr, "$."), ".")
+	parts := strings.Split(clean, ".")
+	if len(parts) == 0 || parts[0] == "" {
+		return ""
+	}
+	curType := ""
+	first := parts[0]
+	if strings.HasPrefix(first, "$") {
+		for _, lv := range locals {
+			if lv.Name == first && lv.GoType != "" {
+				curType = strings.TrimPrefix(lv.GoType, "[]")
+				break
+			}
+		}
+	} else {
+		if !isRootDollar && scopedDotType != "" && cat != nil {
+			if ft, _, ok := stepStructOrModelField(scopedDotType, first, cat); ok {
+				curType = strings.TrimPrefix(ft, "[]")
+			}
+		}
+		if curType == "" {
+			for _, vv := range vars {
+				if vv.Key == first && vv.GoType != "" {
+					curType = strings.TrimPrefix(vv.GoType, "[]")
+					break
+				}
+			}
+		}
+	}
+	for i := 1; i < len(parts) && curType != "" && cat != nil; i++ {
+		ft, _, ok := stepStructOrModelField(curType, parts[i], cat)
+		if !ok {
+			return ""
+		}
+		curType = strings.TrimPrefix(ft, "[]")
+	}
+	return curType
+}
+
+func stepStructOrModelField(holderType, field string, cat *indexer.Catalog) (fieldGoType string, fieldLoc indexer.Location, found bool) {
+	if cat == nil || holderType == "" || field == "" {
+		return "", indexer.Location{}, false
+	}
+	base := strings.TrimPrefix(holderType, "[]")
+	if tbl := cat.Model(base); tbl != nil {
+		for _, c := range tbl.Columns {
+			if c.GoName == field {
+				return cleanTypeRef(c.GoType), c.Loc, true
+			}
+		}
+		for _, r := range tbl.Relations {
+			if r.Name == field {
+				return r.TargetModel, r.Loc, true
+			}
+		}
+	}
+	if st := cat.Struct(base); st != nil {
+		for _, f := range st.Fields {
+			if f.GoName == field {
+				return cleanTypeRef(f.GoType), f.Loc, true
+			}
+		}
+	}
+	return "", indexer.Location{}, false
+}
+
+func cleanTypeRef(raw string) string {
+	s := strings.TrimSpace(raw)
+	isSlice := false
+	if strings.HasPrefix(s, "[]") {
+		isSlice = true
+		s = strings.TrimSpace(s[2:])
+	}
+	s = strings.TrimPrefix(s, "*")
+	if idx := strings.LastIndexByte(s, '.'); idx >= 0 {
+		s = s[idx+1:]
+	}
+	if isSlice && s != "" {
+		return "[]" + s
+	}
+	return s
 }
 
 var (
@@ -768,10 +1171,13 @@ var (
 	}
 )
 
-// TemplateCompletions suggests sub-templates, context/shared/inherited variables, nested struct fields, local $vars, and Go template keywords/functions inside {{ ... }}.
+// TemplateCompletions suggests sub-templates, context/shared/inherited variables, nested struct fields, local $vars, custom FuncMap functions, and HTML routes/assets.
 func TemplateCompletions(path, src string, cat *indexer.Catalog, off int) []CompItem {
-	if !IsTemplateFile(path) || !isInsideTemplateAction(src, off) {
+	if !IsTemplateFile(path) {
 		return nil
+	}
+	if !isInsideTemplateAction(src, off) {
+		return htmlRouteAndAssetCompletions(src, off, cat)
 	}
 	prefix := currentTemplateActionPrefix(src, off)
 
@@ -790,6 +1196,12 @@ func TemplateCompletions(path, src string, cat *indexer.Catalog, off int) []Comp
 			if vi.DefineName != "" && !seen[vi.DefineName] {
 				names = append(names, vi.DefineName)
 				seen[vi.DefineName] = true
+			}
+			for _, d := range vi.Defines {
+				if d.Name != "" && !seen[d.Name] {
+					names = append(names, d.Name)
+					seen[d.Name] = true
+				}
 			}
 		}
 		sort.Strings(names)
@@ -810,34 +1222,25 @@ func TemplateCompletions(path, src string, cat *indexer.Catalog, off int) []Comp
 
 	vars := resolveViewVarsForTemplate(path, cat)
 	locals := extractLocalTemplateVars(src, off, vars, cat)
+	scopedDotType := resolveScopedDotGoType(src, off, vars, locals, cat)
 
-	// 2. Nested struct/model field completion: {{ .user.| }} or {{ $item.| }}
+	// 1b. Immediately after pipe `|`: prioritize custom FuncMap functions and Go built-ins
+	if pipePrefixRe.MatchString(prefix) {
+		return templateFuncCompletions(cat)
+	}
+
+	// 2. Multi-level struct/model field completion: {{ .user.| }}, {{ .profile.User.| }}, or {{ $item.| }}
 	if m := nestedFieldPrefixRe.FindStringSubmatch(prefix); m != nil && cat != nil {
-		holder := strings.TrimPrefix(strings.TrimPrefix(m[1], "$."), ".")
-		goType := ""
-		if strings.HasPrefix(m[1], "$") && !strings.HasPrefix(m[1], "$.") {
-			for _, lv := range locals {
-				if lv.Name == m[1] && lv.GoType != "" {
-					goType = lv.GoType
-					break
-				}
-			}
-		} else {
-			for _, vv := range vars {
-				if vv.Key == holder && vv.GoType != "" {
-					goType = vv.GoType
-					break
-				}
-			}
-		}
+		goType := resolveExprChainGoType(m[1], scopedDotType, vars, locals, cat)
 		if goType != "" {
-			if items := structFieldCompletions(goType, cat); len(items) > 0 {
+			if items := structFieldCompletions(strings.TrimPrefix(goType, "[]"), cat); len(items) > 0 {
 				return items
 			}
 		}
 	}
 
 	hasDotPrefix := off > 0 && src[off-1] == '.'
+	hasRootDollarDot := off >= 2 && src[off-2:off] == "$."
 	hasDollarPrefix := off > 0 && src[off-1] == '$'
 
 	// 3. Local template variable completion when typing $
@@ -860,6 +1263,23 @@ func TemplateCompletions(path, src string, cat *indexer.Catalog, off int) []Comp
 
 	var out []CompItem
 	seen := map[string]bool{}
+
+	// If inside a {{ range }} or {{ with }} block that rebinds `.` (and not typing `$.`), include the scoped struct's fields first!
+	if scopedDotType != "" && !hasRootDollarDot && cat != nil {
+		for _, sf := range structFieldCompletions(scopedDotType, cat) {
+			lbl := "." + sf.Label
+			if hasDotPrefix {
+				lbl = sf.Label
+			}
+			seen[sf.Label] = true
+			out = append(out, CompItem{
+				Label:  lbl,
+				Detail: fmt.Sprintf("%s [scoped . in %s]", sf.Detail, scopedDotType),
+				Kind:   5,
+			})
+		}
+	}
+
 	for _, vv := range vars {
 		if seen[vv.Key] {
 			continue
@@ -898,7 +1318,7 @@ func TemplateCompletions(path, src string, cat *indexer.Catalog, off int) []Comp
 		})
 	}
 
-	// If not immediately after '.', also include local $vars, template keywords, and built-in functions
+	// If not immediately after '.', also include local $vars, template keywords, custom FuncMap functions, and built-in functions
 	if !hasDotPrefix {
 		for _, lv := range locals {
 			out = append(out, CompItem{
@@ -914,13 +1334,39 @@ func TemplateCompletions(path, src string, cat *indexer.Catalog, off int) []Comp
 				Kind:   14, // Keyword
 			})
 		}
-		for _, fn := range tmplBuiltins {
+		out = append(out, templateFuncCompletions(cat)...)
+	}
+	return out
+}
+
+func templateFuncCompletions(cat *indexer.Catalog) []CompItem {
+	var out []CompItem
+	seen := map[string]bool{}
+	if cat != nil && len(cat.TemplateFuncs) > 0 {
+		names := make([]string, 0, len(cat.TemplateFuncs))
+		for k := range cat.TemplateFuncs {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			fn := cat.TemplateFuncs[n]
+			seen[n] = true
 			out = append(out, CompItem{
-				Label:  fn.Label,
-				Detail: fn.Detail,
+				Label:  fn.Name,
+				Detail: fmt.Sprintf("custom FuncMap: %s (%s:%d)", fn.Signature, filepath.Base(fn.Loc.File), fn.Loc.Line+1),
 				Kind:   3, // Function
 			})
 		}
+	}
+	for _, fn := range tmplBuiltins {
+		if seen[fn.Label] {
+			continue
+		}
+		out = append(out, CompItem{
+			Label:  fn.Label,
+			Detail: fn.Detail,
+			Kind:   3, // Function
+		})
 	}
 	return out
 }
@@ -972,10 +1418,13 @@ func structFieldCompletions(goType string, cat *indexer.Catalog) []CompItem {
 	return out
 }
 
-// TemplateHover displays controller origin, value expression, sub-template info, or struct field info inside a template.
+// TemplateHover displays controller origin, value expression, sub-template info, custom FuncMap signature, struct field info, or HTML route/asset info.
 func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult {
-	if !IsTemplateFile(path) || !isInsideTemplateAction(src, off) {
+	if !IsTemplateFile(path) {
 		return nil
+	}
+	if !isInsideTemplateAction(src, off) {
+		return htmlRouteAndAssetHover(src, off, cat)
 	}
 
 	// 1. Check if hovering over {{ template "name" }} or {{ define "name" }} or {{ block "name" }}
@@ -1020,16 +1469,24 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 
 	vars := resolveViewVarsForTemplate(path, cat)
 	locals := extractLocalTemplateVars(src, len(src), vars, cat)
+	scopedDotType := resolveScopedDotGoType(src, off, vars, locals, cat)
 
-	// 2. Check nested struct field hover: .user.Name or $item.Name
-	if holder, field := nestedFieldAtOffset(src, off); holder != "" && field != "" && cat != nil {
-		goType := resolveHolderGoType(holder, vars, locals)
+	// 2. Check multi-level struct field hover: .user.Name, .profile.User.Email, or $item.Name
+	if holderChain, field := nestedFieldAtOffset(src, off); holderChain != "" && field != "" && cat != nil {
+		goType := strings.TrimPrefix(resolveExprChainGoType(holderChain, scopedDotType, vars, locals, cat), "[]")
 		if goType != "" {
 			if tbl := cat.Model(goType); tbl != nil {
 				for _, c := range tbl.Columns {
 					if c.GoName == field {
 						return &HoverResult{
 							Markdown: fmt.Sprintf("**`models.%s.%s`** (`%s`)\n\n- Table column: `%s.%s` (`%s`)", goType, c.GoName, c.GoType, tbl.Name, c.Name, c.SQLType),
+						}
+					}
+				}
+				for _, r := range tbl.Relations {
+					if r.Name == field {
+						return &HoverResult{
+							Markdown: fmt.Sprintf("**`models.%s.%s`** (relation → `models.%s`)", goType, r.Name, r.TargetModel),
 						}
 					}
 				}
@@ -1051,17 +1508,28 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 		for _, lv := range locals {
 			if lv.Name == lvar {
 				line, _ := offsetToLineCol(src, lv.Offset)
+				typeSuffix := ""
+				if lv.GoType != "" {
+					typeSuffix = fmt.Sprintf(" (type `%s`)", lv.GoType)
+				}
 				return &HoverResult{
-					Markdown: fmt.Sprintf("**Local Template Variable `%s`**\n\n- Assigned from: `%s` (line %d)", lv.Name, lv.Expr, line+1),
+					Markdown: fmt.Sprintf("**Local Template Variable `%s`**%s\n\n- Assigned from: `%s` (line %d)", lv.Name, typeSuffix, lv.Expr, line+1),
 				}
 			}
 		}
 	}
 
-	// 4. Context / shared variable hover (.varName)
+	// 4. Context / shared variable or scoped field hover (.varName)
 	word := templateVarAtOffset(src, off)
 	if word == "" {
 		return nil
+	}
+	if scopedDotType != "" && cat != nil {
+		if ft, _, ok := stepStructOrModelField(scopedDotType, word, cat); ok {
+			return &HoverResult{
+				Markdown: fmt.Sprintf("**Scoped Field `.%s`** (`%s` on `%s`)", word, ft, scopedDotType),
+			}
+		}
 	}
 	var lines []string
 	for _, vv := range vars {
@@ -1086,7 +1554,16 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 		}
 	}
 
-	// 5. Built-in keyword / function hover
+	// 5. Custom template.FuncMap function hover
+	if cat != nil {
+		if fn := cat.TemplateFuncs[word]; fn != nil {
+			return &HoverResult{
+				Markdown: fmt.Sprintf("**Custom Template Function `%s`**\n\n- Signature: `%s`\n- Defined in: `%s:%d`", fn.Name, fn.Signature, filepath.Base(fn.Loc.File), fn.Loc.Line+1),
+			}
+		}
+	}
+
+	// 6. Built-in keyword / function hover
 	for _, kw := range tmplKeywords {
 		if kw.Label == word {
 			return &HoverResult{Markdown: fmt.Sprintf("**Go Template Keyword `%s`**\n\n%s", kw.Label, kw.Detail)}
@@ -1100,10 +1577,13 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 	return nil
 }
 
-// TemplateDefinition jumps from .varName, .varName.Field, $local, or {{ template "name" }} in a template file to its definition.
+// TemplateDefinition jumps from .varName, .a.b.c, $local, custom FuncMap function, {{ template "name" }}, or HTML route/asset in a template file to its definition.
 func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []indexer.Location {
-	if !IsTemplateFile(path) || !isInsideTemplateAction(src, off) {
+	if !IsTemplateFile(path) {
 		return nil
+	}
+	if !isInsideTemplateAction(src, off) {
+		return htmlRouteAndAssetDefinition(src, off, cat)
 	}
 
 	// 1. Jump from {{ template "name" }} or {{ block "name" }} to target template file (or from {{ define "name" }} to Go callers)
@@ -1120,10 +1600,17 @@ func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []index
 			return locs
 		}
 		if vi := cat.LookupView(targetName); vi != nil {
-			if vi.DefineLoc.Valid() {
-				locs = append(locs, vi.DefineLoc)
-			} else if vi.Loc.Valid() {
-				locs = append(locs, vi.Loc)
+			for _, d := range vi.Defines {
+				if (d.Name == targetName || strings.TrimSuffix(d.Name, filepath.Ext(d.Name)) == strings.TrimSuffix(targetName, filepath.Ext(targetName))) && d.Loc.Valid() {
+					locs = append(locs, d.Loc)
+				}
+			}
+			if len(locs) == 0 {
+				if vi.DefineLoc.Valid() {
+					locs = append(locs, vi.DefineLoc)
+				} else if vi.Loc.Valid() {
+					locs = append(locs, vi.Loc)
+				}
 			}
 			for _, pl := range vi.PackageLocs {
 				if pl.Valid() {
@@ -1136,29 +1623,14 @@ func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []index
 
 	vars := resolveViewVarsForTemplate(path, cat)
 	locals := extractLocalTemplateVars(src, len(src), vars, cat)
+	scopedDotType := resolveScopedDotGoType(src, off, vars, locals, cat)
 
-	// 2. Jump from .user.Name to Go struct field definition
-	if holder, field := nestedFieldAtOffset(src, off); holder != "" && field != "" && cat != nil {
-		goType := resolveHolderGoType(holder, vars, locals)
+	// 2. Jump from .user.Name or .profile.User.Email to Go struct field definition
+	if holderChain, field := nestedFieldAtOffset(src, off); holderChain != "" && field != "" && cat != nil {
+		goType := strings.TrimPrefix(resolveExprChainGoType(holderChain, scopedDotType, vars, locals, cat), "[]")
 		if goType != "" {
-			if tbl := cat.Model(goType); tbl != nil {
-				for _, c := range tbl.Columns {
-					if c.GoName == field && c.Loc.Valid() {
-						return []indexer.Location{c.Loc}
-					}
-				}
-				for _, r := range tbl.Relations {
-					if r.Name == field && r.Loc.Valid() {
-						return []indexer.Location{r.Loc}
-					}
-				}
-			}
-			if st := cat.Struct(goType); st != nil {
-				for _, f := range st.Fields {
-					if f.GoName == field && f.Loc.Valid() {
-						return []indexer.Location{f.Loc}
-					}
-				}
+			if _, fLoc, ok := stepStructOrModelField(goType, field, cat); ok && fLoc.Valid() {
+				return []indexer.Location{fLoc}
 			}
 		}
 	}
@@ -1173,10 +1645,15 @@ func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []index
 		}
 	}
 
-	// 4. Jump from .varName to controller View().Make/First map key or View().Share
+	// 4. Jump from .varName (or scoped field) or custom FuncMap function
 	word := templateVarAtOffset(src, off)
 	if word == "" {
 		return nil
+	}
+	if scopedDotType != "" && cat != nil {
+		if _, fLoc, ok := stepStructOrModelField(scopedDotType, word, cat); ok && fLoc.Valid() {
+			return []indexer.Location{fLoc}
+		}
 	}
 	var locs []indexer.Location
 	for _, vv := range vars {
@@ -1184,7 +1661,15 @@ func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []index
 			locs = append(locs, vv.Loc)
 		}
 	}
-	return locs
+	if len(locs) > 0 {
+		return locs
+	}
+	if cat != nil {
+		if fn := cat.TemplateFuncs[word]; fn != nil && fn.Loc.Valid() {
+			return []indexer.Location{fn.Loc}
+		}
+	}
+	return nil
 }
 
 var (
@@ -1192,12 +1677,24 @@ var (
 	blockEndKeywordRe  = regexp.MustCompile(`^\s*end\b`)
 )
 
-// TemplateDiagnostics validates template syntax (unclosed {{, unbalanced block/end, missing included templates, and mismatched define names).
+// TemplateDiagnostics validates template syntax (empty file, unclosed {{, unbalanced block/end, missing included templates, mismatched define names, unknown/under-applied custom functions, unpassed variables with fuzzy match, and broken public/ static assets).
 func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 	if !IsTemplateFile(path) {
 		return nil
 	}
 	var diags []Diag
+
+	// 0. Check for empty template file (e.g. resources/views/layouts/auth.tmpl)
+	if strings.TrimSpace(src) == "" {
+		return []Diag{
+			{
+				Start:    0,
+				End:      len(src),
+				Severity: 4, // Hint
+				Message:  "Template file is empty — use Quick Fix to scaffold a '{{ define }}' template block",
+			},
+		}
+	}
 
 	// 1. Check for unclosed {{ action
 	searchFrom := 0
@@ -1222,9 +1719,10 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 
 	// 2. Check block balance (define/if/range/with/block vs end) and included templates
 	type openBlock struct {
-		kw    string
-		start int
-		end   int
+		kw          string
+		start       int
+		end         int
+		rebindsDot  bool
 	}
 	var stack []openBlock
 	localDefines := map[string]bool{}
@@ -1238,6 +1736,22 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 		start  int
 		end    int
 	}
+
+	vars := resolveViewVarsForTemplate(path, cat)
+	knownVars := map[string]bool{"csrf_token": true}
+	var knownVarList []string
+	for _, vv := range vars {
+		if !knownVars[vv.Key] {
+			knownVars[vv.Key] = true
+			knownVarList = append(knownVarList, vv.Key)
+		}
+	}
+	vi := (*indexer.ViewItem)(nil)
+	if cat != nil {
+		vi = cat.ViewForPath(path)
+	}
+	hasKnownCallers := len(vars) > 0 && vi != nil && (len(vi.Callers) > 0 || len(vi.IncludedBy) > 0)
+	reportedVars := map[string]bool{}
 
 	matches := regexp.MustCompile(`(?s)\{\{-?(.*?)-?\}\}`).FindAllStringSubmatchIndex(src, -1)
 	for _, m := range matches {
@@ -1268,7 +1782,9 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 			}{tName, nStart, nEnd})
 		}
 		if bm := blockOpenKeywordRe.FindStringSubmatch(body); bm != nil {
-			stack = append(stack, openBlock{kw: bm[1], start: actStart, end: actEnd})
+			kw := bm[1]
+			rebinds := kw == "range" || kw == "with"
+			stack = append(stack, openBlock{kw: kw, start: actStart, end: actEnd, rebindsDot: rebinds})
 		} else if blockEndKeywordRe.MatchString(body) {
 			if len(stack) == 0 {
 				diags = append(diags, Diag{
@@ -1279,6 +1795,47 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 				})
 			} else {
 				stack = stack[:len(stack)-1]
+			}
+		}
+
+		// Check custom template function calls & pipe targets
+		if cat != nil && len(cat.TemplateFuncs) > 0 {
+			diags = append(diags, checkTemplateActionFuncs(body, bodyStart, cat)...)
+		}
+
+		// Check unpassed top-level .var references when callers are known
+		if hasKnownCallers {
+			dotRebound := false
+			for _, sb := range stack {
+				if sb.rebindsDot {
+					dotRebound = true
+					break
+				}
+			}
+			isConditionalAction := strings.HasPrefix(trimmed, "if ") || strings.HasPrefix(trimmed, "with ") || strings.Contains(trimmed, "default ")
+			if !isConditionalAction {
+				dotVarMatches := regexp.MustCompile(`(?:^|[\s(|,=:$])(\$)?\.([A-Za-z_][A-Za-z0-9_]*)`).FindAllStringSubmatchIndex(body, -1)
+				for _, vm := range dotVarMatches {
+					hasDollar := vm[2] >= 0 && vm[3] > vm[2]
+					if dotRebound && !hasDollar {
+						continue
+					}
+					vStart, vEnd := bodyStart+vm[4], bodyStart+vm[5]
+					vName := src[vStart:vEnd]
+					if !knownVars[vName] && !reportedVars[vName] {
+						reportedVars[vName] = true
+						msg := fmt.Sprintf("Template variable '.%s' is not passed by callers of '%s'", vName, vi.Name)
+						if best := closestVarMatch(vName, knownVarList); best != "" {
+							msg = fmt.Sprintf("Template variable '.%s' is not passed to '%s' (did you mean '.%s'?)", vName, vi.Name, best)
+						}
+						diags = append(diags, Diag{
+							Start:    vStart - 1,
+							End:      vEnd,
+							Severity: 4, // Hint
+							Message:  msg,
+						})
+					}
+				}
 			}
 		}
 	}
@@ -1308,7 +1865,7 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 			}
 		}
 		if len(defineSpans) == 1 {
-			if vi := cat.ViewForPath(path); vi != nil && vi.Source == "app" {
+			if vi != nil && vi.Source == "app" {
 				d := defineSpans[0]
 				noExt := strings.TrimSuffix(vi.Name, filepath.Ext(vi.Name))
 				if d.name != vi.Name && d.name != noExt {
@@ -1322,15 +1879,226 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 			}
 		}
 	}
+
+	// 3. Check static asset references in public/ if public/ directory exists
+	if cat != nil && cat.Root != "" {
+		diags = append(diags, checkStaticAssetLinks(src, cat)...)
+	}
 	return diags
 }
 
-// TemplateCodeActions provides Quick Fixes inside .tmpl files (sync define name, create missing partial template).
+func checkTemplateActionFuncs(body string, bodyStart int, cat *indexer.Catalog) []Diag {
+	var diags []Diag
+	isKnownKwOrBuiltin := func(name string) bool {
+		for _, kw := range tmplKeywords {
+			if kw.Label == name {
+				return true
+			}
+		}
+		for _, fn := range tmplBuiltins {
+			if fn.Label == name {
+				return true
+			}
+		}
+		return name == "else" || name == "true" || name == "false"
+	}
+
+	// Check pipeline segments: seg0 | seg1 | seg2
+	segments := strings.Split(body, "|")
+	offsetInBody := 0
+	for segIdx, seg := range segments {
+		if idx := strings.Index(body[offsetInBody:], seg); idx >= 0 {
+			offsetInBody += idx
+		}
+		trimSeg := strings.TrimSpace(seg)
+		if segIdx == 0 {
+			if idx := strings.Index(trimSeg, ":="); idx >= 0 {
+				trimSeg = strings.TrimSpace(trimSeg[idx+2:])
+			}
+			for _, prefixKw := range []string{"if ", "with ", "range ", "else if "} {
+				if strings.HasPrefix(trimSeg, prefixKw) {
+					trimSeg = strings.TrimSpace(trimSeg[len(prefixKw):])
+				}
+			}
+		}
+		fields := strings.Fields(trimSeg)
+		if len(fields) > 0 {
+			head := fields[0]
+			isIdent := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(head)
+			if isIdent && (segIdx > 0 || len(fields) > 1) && !isKnownKwOrBuiltin(head) {
+				relIdx := strings.Index(seg, head)
+				fnStart := bodyStart + offsetInBody + relIdx
+				fnEnd := fnStart + len(head)
+				fnItem := cat.TemplateFuncs[head]
+				if fnItem == nil {
+					diags = append(diags, Diag{
+						Start:    fnStart,
+						End:      fnEnd,
+						Severity: 2, // Warning
+						Message:  fmt.Sprintf("Unknown template function '%s' (not in Go built-ins or registered FuncMap)", head),
+					})
+				} else {
+					passedArgs := countTemplateCallArgs(trimSeg[len(head):])
+					if segIdx > 0 {
+						passedArgs++ // piped value counts as last arg
+					}
+					if passedArgs < fnItem.MinArgs {
+						diags = append(diags, Diag{
+							Start:    fnStart,
+							End:      fnEnd,
+							Severity: 2, // Warning
+							Message:  fmt.Sprintf("Template function '%s' expects at least %d argument(s) (%s), got %d", head, fnItem.MinArgs, fnItem.Signature, passedArgs),
+						})
+					}
+				}
+			}
+		}
+		offsetInBody += len(seg)
+	}
+	return diags
+}
+
+func countTemplateCallArgs(argText string) int {
+	s := strings.TrimSpace(argText)
+	if s == "" {
+		return 0
+	}
+	count := 0
+	inStr := byte(0)
+	parenDepth := 0
+	inToken := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inStr != 0 {
+			if ch == inStr && (i == 0 || s[i-1] != '\\') {
+				inStr = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inStr = ch
+			if parenDepth == 0 && !inToken {
+				inToken = true
+				count++
+			}
+			continue
+		}
+		if ch == '(' {
+			if parenDepth == 0 && !inToken {
+				inToken = true
+				count++
+			}
+			parenDepth++
+			continue
+		}
+		if ch == ')' {
+			if parenDepth > 0 {
+				parenDepth--
+			}
+			if parenDepth == 0 {
+				inToken = false
+			}
+			continue
+		}
+		if parenDepth > 0 {
+			continue
+		}
+		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
+			inToken = false
+		} else if !inToken {
+			inToken = true
+			count++
+		}
+	}
+	return count
+}
+
+func closestVarMatch(target string, candidates []string) string {
+	best := ""
+	bestDist := 99
+	normTarget := strings.ToLower(strings.ReplaceAll(target, "_", ""))
+	for _, c := range candidates {
+		normCand := strings.ToLower(strings.ReplaceAll(c, "_", ""))
+		if normCand == normTarget {
+			return c
+		}
+		d := levenshtein(strings.ToLower(target), strings.ToLower(c))
+		if d <= 3 && d < bestDist {
+			bestDist = d
+			best = c
+		}
+	}
+	return best
+}
+
+func levenshtein(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+	prev := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur := make([]int, len(b)+1)
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+			ins := cur[j-1] + 1
+			del := prev[j] + 1
+			sub := prev[j-1] + cost
+			m := ins
+			if del < m {
+				m = del
+			}
+			if sub < m {
+				m = sub
+			}
+			cur[j] = m
+		}
+		prev = cur
+	}
+	return prev[len(b)]
+}
+
+// TemplateCodeActions provides Quick Fixes inside .tmpl files (scaffold empty file, sync define name, create missing partial, fix typo var or add var to controller map).
 func TemplateCodeActions(path, src string, cat *indexer.Catalog, off int) []CodeAction {
 	if !IsTemplateFile(path) || cat == nil {
 		return nil
 	}
 	var actions []CodeAction
+
+	// 1. Empty template file Quick Fix
+	if strings.TrimSpace(src) == "" {
+		defName := filepath.Base(path)
+		if vi := cat.ViewForPath(path); vi != nil && vi.Name != "" {
+			defName = vi.Name
+		}
+		scaffold := fmt.Sprintf("{{ define %q }}\n<div>\n  \n</div>\n{{ end }}\n", defName)
+		actions = append(actions, CodeAction{
+			Title: fmt.Sprintf("Scaffold '{{ define %q }}' template block", defName),
+			Kind:  "quickfix",
+			Edits: []TextEdit{
+				{
+					File:    path,
+					Start:   0,
+					End:     len(src),
+					NewText: scaffold,
+				},
+			},
+		})
+		return actions
+	}
+
 	directive, targetName, nStart, nEnd := templateDirectiveSpanAtOffset(src, off)
 	if directive == "define" && targetName != "" {
 		if vi := cat.ViewForPath(path); vi != nil && vi.Name != targetName {
@@ -1369,6 +2137,66 @@ func TemplateCodeActions(path, src string, cat *indexer.Catalog, off int) []Code
 			})
 		}
 	}
+
+	// Quick Fixes on unpassed template variable `.varName`
+	if isInsideTemplateAction(src, off) {
+		word, wStart, wEnd := templateVarSpanAtOffset(src, off)
+		if word != "" {
+			vars := resolveViewVarsForTemplate(path, cat)
+			known := map[string]bool{"csrf_token": true}
+			var candList []string
+			for _, vv := range vars {
+				if !known[vv.Key] {
+					known[vv.Key] = true
+					candList = append(candList, vv.Key)
+				}
+			}
+			if !known[word] {
+				if best := closestVarMatch(word, candList); best != "" {
+					actions = append(actions, CodeAction{
+						Title: fmt.Sprintf("Change '.%s' to '.%s'", word, best),
+						Kind:  "quickfix",
+						Edits: []TextEdit{
+							{
+								File:    path,
+								Start:   wStart,
+								End:     wEnd,
+								NewText: best,
+							},
+						},
+					})
+				}
+				if vi := cat.ViewForPath(path); vi != nil {
+					for _, caller := range vi.Callers {
+						if caller.Method == "Make" && caller.Loc.Valid() {
+							if b, err := os.ReadFile(caller.Loc.File); err == nil {
+								cSrc := string(b)
+								calls, fset := findViewCalls(caller.Loc.File, cSrc)
+								for _, vc := range calls {
+									if vc.DataMap != nil && fset != nil && len(vc.Names) > 0 && sameViewName(vc.Names[0].Name, vi.Name, cat) {
+										lbrace := fset.Position(vc.DataMap.Lbrace).Offset
+										actions = append(actions, CodeAction{
+											Title: fmt.Sprintf("Add %q to View().Make data map in %s", word, filepath.Base(caller.Loc.File)),
+											Kind:  "quickfix",
+											Edits: []TextEdit{
+												{
+													File:    caller.Loc.File,
+													Start:   lbrace + 1,
+													End:     lbrace + 1,
+													NewText: fmt.Sprintf("\n\t\t%q: \"\",", word),
+												},
+											},
+										})
+										break
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	return actions
 }
 
@@ -1382,7 +2210,7 @@ type TemplateLens struct {
 	TCol  int
 }
 
-// TemplateCodeLenses returns CodeLens items for a template file (Go callers, parent template includes, and package overrides).
+// TemplateCodeLenses returns CodeLens items for a template file (Go callers, parent template includes, package overrides, and orphaned status).
 func TemplateCodeLenses(path string, cat *indexer.Catalog) []TemplateLens {
 	if !IsTemplateFile(path) || cat == nil {
 		return nil
@@ -1421,9 +2249,11 @@ func TemplateCodeLenses(path string, cat *indexer.Catalog) []TemplateLens {
 	}
 
 	// Check parent templates that include this template via {{ template "..." }}
+	includedCount := 0
 	for _, other := range cat.ViewItems {
 		for _, inc := range other.Includes {
 			if target := cat.LookupView(inc.Target); target != nil && target.Name == vi.Name && inc.Loc.Valid() {
+				includedCount++
 				lenses = append(lenses, TemplateLens{
 					Line:  line,
 					Col:   0,
@@ -1458,7 +2288,287 @@ func TemplateCodeLenses(path string, cat *indexer.Catalog) []TemplateLens {
 			TCol:  vi.Loc.Col,
 		})
 	}
+
+	// Orphaned view indicator if not called by any controller/route and not included by any template
+	isPartialDir := strings.HasPrefix(vi.Name, "layouts/") || strings.HasPrefix(vi.Name, "partials/") || strings.HasPrefix(vi.Name, "components/")
+	if len(vi.Callers) == 0 && includedCount == 0 && !isPartialDir {
+		lenses = append(lenses, TemplateLens{
+			Line:  line,
+			Col:   0,
+			Title: "$(info) Unreferenced view (0 callers in controllers or routes)",
+			File:  path,
+			TLine: line,
+			TCol:  0,
+		})
+	}
 	return lenses
+}
+
+// DocSymbol represents a hierarchical document symbol for textDocument/documentSymbol.
+type DocSymbol struct {
+	Name      string
+	Detail    string
+	Kind      int // 12=Function, 2=Module, 13=Variable, 5=Class
+	StartLine int
+	StartCol  int
+	EndLine   int
+	EndCol    int
+	Children  []DocSymbol
+}
+
+// TemplateDocumentSymbols returns an outline of {{ define }}, {{ block }}, {{ template }}, {{ range }}, {{ with }}, and $vars in a .tmpl file.
+func TemplateDocumentSymbols(path, src string) []DocSymbol {
+	if !IsTemplateFile(path) {
+		return nil
+	}
+	var symbols []DocSymbol
+	matches := regexp.MustCompile(`(?s)\{\{-?(.*?)-?\}\}`).FindAllStringSubmatchIndex(src, -1)
+	for _, m := range matches {
+		bStart, bEnd := m[2], m[3]
+		body := strings.TrimSpace(src[bStart:bEnd])
+		if strings.HasPrefix(body, "/*") {
+			continue
+		}
+		sLine, sCol := offsetToLineCol(src, m[0])
+		eLine, eCol := offsetToLineCol(src, m[1])
+		if dm := regexp.MustCompile(`^define\s+"([^"]+)"`).FindStringSubmatch(body); dm != nil {
+			symbols = append(symbols, DocSymbol{
+				Name:      "define \"" + dm[1] + "\"",
+				Detail:    "template definition",
+				Kind:      2, // Module
+				StartLine: sLine, StartCol: sCol, EndLine: eLine, EndCol: eCol,
+			})
+		} else if bm := regexp.MustCompile(`^(template|block)\s+"([^"]+)"(?:\s+(.+))?`).FindStringSubmatch(body); bm != nil {
+			symbols = append(symbols, DocSymbol{
+				Name:      bm[1] + " \"" + bm[2] + "\"",
+				Detail:    strings.TrimSpace(bm[3]),
+				Kind:      12, // Function
+				StartLine: sLine, StartCol: sCol, EndLine: eLine, EndCol: eCol,
+			})
+		} else if rm := regexp.MustCompile(`^(range|with)\s+(.+)$`).FindStringSubmatch(body); rm != nil {
+			symbols = append(symbols, DocSymbol{
+				Name:      rm[1] + " " + strings.TrimSpace(rm[2]),
+				Detail:    "scope block",
+				Kind:      5, // Class/Namespace
+				StartLine: sLine, StartCol: sCol, EndLine: eLine, EndCol: eCol,
+			})
+		} else if lm := regexp.MustCompile(`^(\$[A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(.+)$`).FindStringSubmatch(body); lm != nil {
+			symbols = append(symbols, DocSymbol{
+				Name:      lm[1],
+				Detail:    strings.TrimSpace(lm[2]),
+				Kind:      13, // Variable
+				StartLine: sLine, StartCol: sCol, EndLine: eLine, EndCol: eCol,
+			})
+		}
+	}
+	return symbols
+}
+
+// TemplateInlayHints returns inline type/origin hints inside .tmpl files for range/with blocks and local variable declarations.
+func TemplateInlayHints(path, src string, cat *indexer.Catalog) []InlayHintItem {
+	if !IsTemplateFile(path) || cat == nil {
+		return nil
+	}
+	vars := resolveViewVarsForTemplate(path, cat)
+	if len(vars) == 0 {
+		return nil
+	}
+	locals := extractLocalTemplateVars(src, len(src), vars, cat)
+	var hints []InlayHintItem
+	for _, lv := range locals {
+		if lv.GoType != "" {
+			hints = append(hints, InlayHintItem{
+				Offset: lv.Offset + len(lv.Name),
+				Label:  ": " + lv.GoType,
+			})
+		}
+	}
+	return hints
+}
+
+func htmlRouteAndAssetCompletions(src string, off int, cat *indexer.Catalog) []CompItem {
+	if cat == nil || off <= 0 || off > len(src) {
+		return nil
+	}
+	lineStart := strings.LastIndexByte(src[:off], '\n') + 1
+	linePrefix := src[lineStart:off]
+
+	if htmlRouteAttrPrefixRe.MatchString(linePrefix) || jsFetchRoutePrefixRe.MatchString(linePrefix) {
+		seen := map[string]bool{}
+		var out []CompItem
+		for _, rt := range cat.Routes {
+			if rt.Method == "gRPC" || rt.Path == "" || seen[rt.Method+":"+rt.Path] {
+				continue
+			}
+			seen[rt.Method+":"+rt.Path] = true
+			detail := rt.Method + " → " + rt.Handler
+			if rt.View != "" {
+				detail += " (renders " + rt.View + ")"
+			}
+			out = append(out, CompItem{
+				Label:  rt.Path,
+				Detail: detail,
+				Kind:   18, // Reference
+			})
+		}
+		if out != nil {
+			return out
+		}
+	}
+
+	if htmlAssetAttrPrefixRe.MatchString(linePrefix) && cat.Root != "" {
+		pubDir := filepath.Join(cat.Root, "public")
+		var out []CompItem
+		_ = filepath.WalkDir(pubDir, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(pubDir, p)
+			if err != nil {
+				return nil
+			}
+			webPath := "/" + filepath.ToSlash(rel)
+			out = append(out, CompItem{
+				Label:  webPath,
+				Detail: "public" + webPath,
+				Kind:   17, // File
+			})
+			return nil
+		})
+		return out
+	}
+	return nil
+}
+
+func htmlRouteAndAssetHover(src string, off int, cat *indexer.Catalog) *HoverResult {
+	if cat == nil {
+		return nil
+	}
+	urlPath := quotedPathAtOffset(src, off)
+	if urlPath == "" || !strings.HasPrefix(urlPath, "/") {
+		return nil
+	}
+	var matchedRoutes []*indexer.RouteItem
+	for _, rt := range cat.Routes {
+		if rt.Path == urlPath {
+			matchedRoutes = append(matchedRoutes, rt)
+		}
+	}
+	if len(matchedRoutes) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "**Goravel Route `%s`**\n\n", urlPath)
+		for _, rt := range matchedRoutes {
+			line := fmt.Sprintf("- **%s** → `%s`", rt.Method, rt.Handler)
+			if rt.View != "" {
+				line += fmt.Sprintf(" (view: `%s`)", rt.View)
+			}
+			if len(rt.Middlewares) > 0 {
+				line += fmt.Sprintf(" `[%s]`", strings.Join(rt.Middlewares, ", "))
+			}
+			fmt.Fprintf(&b, "%s (`%s:%d`)\n", line, filepath.Base(rt.Loc.File), rt.Loc.Line+1)
+		}
+		return &HoverResult{Markdown: b.String()}
+	}
+	if cat.Root != "" {
+		assetFile := filepath.Join(cat.Root, "public", filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
+		if st, err := os.Stat(assetFile); err == nil && !st.IsDir() {
+			return &HoverResult{
+				Markdown: fmt.Sprintf("**Static Asset `%s`**\n\n- File: `public%s` (%d bytes)", urlPath, urlPath, st.Size()),
+			}
+		}
+	}
+	return nil
+}
+
+func htmlRouteAndAssetDefinition(src string, off int, cat *indexer.Catalog) []indexer.Location {
+	if cat == nil {
+		return nil
+	}
+	urlPath := quotedPathAtOffset(src, off)
+	if urlPath == "" || !strings.HasPrefix(urlPath, "/") {
+		return nil
+	}
+	var locs []indexer.Location
+	for _, rt := range cat.Routes {
+		if rt.Path == urlPath {
+			if rt.Loc.Valid() {
+				locs = append(locs, rt.Loc)
+			}
+			if rt.CtrlLoc.Valid() {
+				locs = append(locs, rt.CtrlLoc)
+			}
+		}
+	}
+	if len(locs) > 0 {
+		return locs
+	}
+	if cat.Root != "" {
+		assetFile := filepath.Join(cat.Root, "public", filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
+		if st, err := os.Stat(assetFile); err == nil && !st.IsDir() {
+			return []indexer.Location{{File: assetFile, Line: 0, Col: 0}}
+		}
+	}
+	return nil
+}
+
+func checkStaticAssetLinks(src string, cat *indexer.Catalog) []Diag {
+	pubDir := filepath.Join(cat.Root, "public")
+	if st, err := os.Stat(pubDir); err != nil || !st.IsDir() {
+		return nil
+	}
+	routeSet := map[string]bool{}
+	for _, rt := range cat.Routes {
+		routeSet[rt.Path] = true
+	}
+	staticExts := map[string]bool{
+		".css": true, ".js": true, ".png": true, ".jpg": true, ".jpeg": true,
+		".svg": true, ".ico": true, ".webp": true, ".woff": true, ".woff2": true,
+	}
+	var diags []Diag
+	re := regexp.MustCompile(`(?i)\b(?:src|href)\s*=\s*["'](/[A-Za-z0-9_./-]+)["']`)
+	for _, m := range re.FindAllStringSubmatchIndex(src, -1) {
+		pStart, pEnd := m[2], m[3]
+		urlPath := src[pStart:pEnd]
+		ext := strings.ToLower(filepath.Ext(urlPath))
+		if !staticExts[ext] || routeSet[urlPath] {
+			continue
+		}
+		diskPath := filepath.Join(pubDir, filepath.FromSlash(strings.TrimPrefix(urlPath, "/")))
+		if _, err := os.Stat(diskPath); err != nil {
+			diags = append(diags, Diag{
+				Start:    pStart,
+				End:      pEnd,
+				Severity: 2, // Warning
+				Message:  fmt.Sprintf("Static asset '%s' not found in public/ directory", urlPath),
+			})
+		}
+	}
+	return diags
+}
+
+func quotedPathAtOffset(src string, off int) string {
+	if off < 0 || off >= len(src) {
+		return ""
+	}
+	l, r := off, off
+	for l > 0 && src[l-1] != '"' && src[l-1] != '\'' && src[l-1] != '`' && src[l-1] != '\n' {
+		l--
+	}
+	if l == 0 || (src[l-1] != '"' && src[l-1] != '\'' && src[l-1] != '`') {
+		return ""
+	}
+	quote := src[l-1]
+	for r < len(src) && src[r] != quote && src[r] != '\n' {
+		r++
+	}
+	if r >= len(src) || src[r] != quote {
+		return ""
+	}
+	val := src[l:r]
+	if idx := strings.IndexAny(val, "?#"); idx >= 0 {
+		val = val[:idx]
+	}
+	return strings.TrimSpace(val)
 }
 
 func templateDirectiveAtOffset(src string, off int) (directive, target string) {
@@ -1511,28 +2621,11 @@ func nestedFieldAtOffset(src string, off int) (holder, field string) {
 	for hlStart > 0 && (isIdentChar(src[hlStart-1]) || src[hlStart-1] == '$' || src[hlStart-1] == '.') {
 		hlStart--
 	}
-	holder = strings.TrimPrefix(strings.TrimPrefix(src[hlStart:hlEnd], "$."), ".")
-	if holder == "" {
+	holder = strings.TrimSpace(src[hlStart:hlEnd])
+	if holder == "" || holder == "$" || holder == "." {
 		return "", ""
 	}
 	return holder, field
-}
-
-func resolveHolderGoType(holder string, vars []indexer.ViewVar, locals []localTemplateVar) string {
-	if strings.HasPrefix(holder, "$") {
-		for _, lv := range locals {
-			if lv.Name == holder && lv.GoType != "" {
-				return lv.GoType
-			}
-		}
-		return ""
-	}
-	for _, vv := range vars {
-		if vv.Key == holder && vv.GoType != "" {
-			return vv.GoType
-		}
-	}
-	return ""
 }
 
 func dollarVarAtOffset(src string, off int) string {
@@ -1556,8 +2649,13 @@ func dollarVarAtOffset(src string, off int) string {
 }
 
 func templateVarAtOffset(src string, off int) string {
+	w, _, _ := templateVarSpanAtOffset(src, off)
+	return w
+}
+
+func templateVarSpanAtOffset(src string, off int) (string, int, int) {
 	if off < 0 || off > len(src) {
-		return ""
+		return "", 0, 0
 	}
 	l, r := off, off
 	for l > 0 && isIdentChar(src[l-1]) {
@@ -1567,9 +2665,9 @@ func templateVarAtOffset(src string, off int) string {
 		r++
 	}
 	if l == r {
-		return ""
+		return "", 0, 0
 	}
-	return src[l:r]
+	return src[l:r], l, r
 }
 
 // TemplateTargetAtOffset inspects a .go or .tmpl file at off and returns either a target view name or (viewName, varKey) for References/Rename.

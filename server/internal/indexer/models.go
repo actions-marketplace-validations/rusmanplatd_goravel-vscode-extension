@@ -161,20 +161,54 @@ func indexModels(c *Catalog, root string) {
 }
 
 func indexRequests(c *Catalog, root string) {
-	files := walkGoFiles(filepath.Join(root, "app", "http", "requests"))
-	for _, pf := range files {
-		for _, d := range pf.file.Decls {
-			gd, ok := d.(*ast.GenDecl)
-			if !ok || gd.Tok != token.TYPE {
-				continue
-			}
-			for _, s := range gd.Specs {
-				ts := s.(*ast.TypeSpec)
-				st, ok := ts.Type.(*ast.StructType)
-				if !ok {
-					continue
+	dirs := []string{
+		filepath.Join(root, "app", "http", "requests"),
+		filepath.Join(root, "app", "http", "responses"),
+		filepath.Join(root, "app", "services"),
+		filepath.Join(root, "app", "http", "controllers"),
+		filepath.Join(root, "pkg"),
+	}
+	for _, dir := range dirs {
+		files := walkGoFiles(dir)
+		for _, pf := range files {
+			for _, d := range pf.file.Decls {
+				switch decl := d.(type) {
+				case *ast.GenDecl:
+					if decl.Tok != token.TYPE {
+						continue
+					}
+					for _, s := range decl.Specs {
+						ts, ok := s.(*ast.TypeSpec)
+						if !ok || ts.Name == nil {
+							continue
+						}
+						st, ok := ts.Type.(*ast.StructType)
+						if !ok {
+							continue
+						}
+						if _, exists := c.Structs[ts.Name.Name]; !exists {
+							c.Structs[ts.Name.Name] = structInfo(pf, ts.Name.Name, st, ts.Name.Pos())
+						}
+					}
+				case *ast.FuncDecl:
+					if decl.Name == nil || decl.Type == nil || decl.Type.Results == nil || len(decl.Type.Results.List) == 0 {
+						continue
+					}
+					retExpr := exprString(decl.Type.Results.List[0].Type)
+					retType := cleanModelType(retExpr)
+					if strings.HasPrefix(strings.TrimSpace(retExpr), "[]") {
+						retType = "[]" + retType
+					}
+					if retType == "" || retType == "error" || retType == "bool" || retType == "int" || retType == "string" || retType == "Response" {
+						continue
+					}
+					c.FuncReturns[decl.Name.Name] = retType
+					if decl.Recv != nil {
+						if r := recvName(decl.Recv); r != "" {
+							c.FuncReturns[r+"."+decl.Name.Name] = retType
+						}
+					}
 				}
-				c.Structs[ts.Name.Name] = structInfo(pf, ts.Name.Name, st, ts.Name.Pos())
 			}
 		}
 	}

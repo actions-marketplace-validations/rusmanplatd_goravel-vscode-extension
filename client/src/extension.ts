@@ -14,6 +14,7 @@ import {
   SeederInfo,
   TableInfo,
   UnregisteredInfo,
+  ViewsTreeProvider,
 } from "./views/explorers";
 
 let client: LanguageClient | undefined;
@@ -24,6 +25,7 @@ let currentTables: TableInfo[] = [];
 let currentRoutes: RouteInfo[] = [];
 const modelsProvider = new ModelsTreeProvider();
 const routesProvider = new RoutesTreeProvider();
+const viewsProvider = new ViewsTreeProvider();
 const migrationsProvider = new MigrationsTreeProvider();
 const commandsProvider = new CommandsTreeProvider();
 
@@ -44,6 +46,7 @@ async function refreshOverview() {
     currentRoutes = data.routes || [];
     modelsProvider.setData(currentTables);
     routesProvider.setData(currentRoutes);
+    viewsProvider.setData(data.views || [], data.sharedViewVars || [], data.templateFuncs || []);
     migrationsProvider.setData(data.migrations || []);
     customCommands = data.commands || [];
     customSeeders = data.seeders || [];
@@ -146,6 +149,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
   ctx.subscriptions.push(
     vscode.window.registerTreeDataProvider("goravel.views.models", modelsProvider),
     vscode.window.registerTreeDataProvider("goravel.views.routes", routesProvider),
+    vscode.window.registerTreeDataProvider("goravel.views.templates", viewsProvider),
     vscode.window.registerTreeDataProvider("goravel.views.migrations", migrationsProvider),
     vscode.window.registerTreeDataProvider("goravel.views.commands", commandsProvider)
   );
@@ -484,6 +488,7 @@ function renderRouteMatrixHtml(routes: RouteInfo[]): string {
         <th>Method</th>
         <th>Path</th>
         <th>Handler</th>
+        <th>View</th>
         <th>Middleware</th>
         <th>Module</th>
         <th>Actions</th>
@@ -514,13 +519,14 @@ function renderRouteMatrixHtml(routes: RouteInfo[]): string {
         .filter(({ r }) => {
           if (m && r.method !== m) return false;
           if (!q) return true;
-          const hay = [r.method, r.path, r.handler, (r.middlewares || []).join(" "), r.module].join(" ").toLowerCase();
+          const hay = [r.method, r.path, r.handler, r.view || "", (r.middlewares || []).join(" "), r.module].join(" ").toLowerCase();
           return hay.includes(q);
         })
         .map(({ r, idx }) => \`<tr>
           <td><span class="badge">\${esc(r.method)}</span></td>
           <td><code>\${esc(r.path)}</code></td>
           <td>\${esc(r.handler)}</td>
+          <td><code>\${esc(r.view || "-")}</code></td>
           <td>\${esc((r.middlewares || []).join(", "))}</td>
           <td>\${esc(r.module)}</td>
           <td>

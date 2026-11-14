@@ -138,9 +138,18 @@ func walkRouteBlock(c *Catalog, pf *parsedFile, module, parentPrefix string, par
 				mws := mergeMiddlewares(parentMws, extractChainMiddlewares(sel.X))
 				ctrl, action, handler := resolveRouteHandler(call.Args[1], ctrlVars)
 				var ctrlLoc Location
+				viewName := ""
 				if ctrl != "" && action != "" {
 					if m, ok := c.Controllers[ctrl]; ok {
 						ctrlLoc = m[action]
+					}
+				} else if fn, ok := call.Args[1].(*ast.FuncLit); ok {
+					ctrlLoc = loc(pf, fn.Pos())
+					viewName = extractViewFromFuncLit(fn)
+					if viewName != "" {
+						handler = "closure (" + viewName + ")"
+					} else {
+						handler = "closure"
 					}
 				}
 				c.Routes = append(c.Routes, &RouteItem{
@@ -152,6 +161,7 @@ func walkRouteBlock(c *Catalog, pf *parsedFile, module, parentPrefix string, par
 					Controller:  ctrl,
 					Action:      action,
 					Module:      module,
+					View:        viewName,
 					Loc:         loc(pf, sel.Sel.Pos()),
 					CtrlLoc:     ctrlLoc,
 				})
@@ -329,6 +339,45 @@ func resolveRouteHandler(e ast.Expr, ctrlVars map[string]string) (ctrl, action, 
 		return
 	}
 	return "", "", exprString(e)
+}
+
+func extractViewFromFuncLit(fn *ast.FuncLit) string {
+	if fn == nil || fn.Body == nil {
+		return ""
+	}
+	found := ""
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if found != "" {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if sel.Sel.Name == "Make" && isViewReceiver(sel.X) {
+			if bl, ok := call.Args[0].(*ast.BasicLit); ok && bl.Kind == token.STRING {
+				if v, err := strconv.Unquote(bl.Value); err == nil {
+					found = v
+				}
+			}
+		} else if sel.Sel.Name == "First" && isViewReceiver(sel.X) {
+			if cl, ok := call.Args[0].(*ast.CompositeLit); ok {
+				for _, elt := range cl.Elts {
+					if bl, ok := elt.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+						if v, err := strconv.Unquote(bl.Value); err == nil && found == "" {
+							found = v
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func joinPath(a, b string) string {

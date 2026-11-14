@@ -68,6 +68,35 @@
       "{{ .csrf_token }}"
     ],
     "description": "Output Goravel CSRF token"
+  },
+  "Goravel Page With Header/Footer Layout": {
+    "prefix": "glayout",
+    "body": [
+      "{{ define \"${1:folder/page.tmpl}\" }}",
+      "{{ template \"${2:layouts/header.tmpl}\" . }}",
+      "<main class=\"container mx-auto py-6\">",
+      "\t$0",
+      "</main>",
+      "{{ template \"${3:layouts/footer.tmpl}\" . }}",
+      "{{ end }}"
+    ],
+    "description": "Scaffold a Goravel view with header and footer layout partials"
+  },
+  "Goravel Pipeline Filter": {
+    "prefix": "gpipe",
+    "body": [
+      "{{ .${1:field} | ${2:default} \"${3:fallback}\" }}"
+    ],
+    "description": "Output a template variable piped through a custom FuncMap filter"
+  },
+  "Goravel Alpine.js Component": {
+    "prefix": "gxdata",
+    "body": [
+      "<div x-data=\"{ ${1:open}: ${2:false} }\">",
+      "\t$0",
+      "</div>"
+    ],
+    "description": "Alpine.js x-data interactive component block"
   }
 }
 

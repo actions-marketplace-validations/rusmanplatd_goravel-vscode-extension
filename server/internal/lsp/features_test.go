@@ -754,3 +754,245 @@ func (c *ViewController) Missing(ctx http.Context) http.Response {
 		t.Errorf("expected cross-file rename edits in both admin/index.tmpl and view_controller.go, got %+v", changes)
 	}
 }
+
+func TestP6ViewAndTemplateEnhancements(t *testing.T) {
+	root := t.TempDir()
+
+	// 1. Custom template.FuncMap in config/http.go (P6.1)
+	httpCfgPath := writeTempFile(t, root, "config/http.go", `package config
+import "html/template"
+func init() {
+	_ = template.FuncMap{
+		"upper": func(s string) string { return s },
+		"default": func(d any, v any) any { return v },
+	}
+}
+`)
+
+	// 2. Models & Response Structs + Service returning *responses.ProfileResponse (P6.5)
+	modelPath := writeTempFile(t, root, "app/models/user.go", `package models
+type User struct {
+	ID    uint   `+"`gorm:\"column:id\"`"+`
+	Email string `+"`gorm:\"column:email\"`"+`
+}
+func (*User) TableName() string { return "users" }
+`)
+	_ = writeTempFile(t, root, "app/http/responses/profile_response.go", `package responses
+import "goravel/app/models"
+type ProfileResponse struct {
+	Bio  string
+	User models.User
+}
+`)
+	_ = writeTempFile(t, root, "app/services/user_service.go", `package services
+import "goravel/app/http/responses"
+type UserService struct{}
+func (s *UserService) GetProfile() (*responses.ProfileResponse, error) {
+	return nil, nil
+}
+`)
+
+	// 3. Multi-hop templates: auth/signin.tmpl -> layouts/header.tmpl -> partials/nav.tmpl, plus empty & orphan views (P6.4, P6.6, P6.7, P6.9)
+	_ = writeTempFile(t, root, "public/css/app.css", `body { margin: 0; }`)
+	navPath := writeTempFile(t, root, "resources/views/partials/nav.tmpl", `{{ define "partials/nav.tmpl" }}
+<nav>{{ .nav_brand }}</nav>
+{{ end }}`)
+	headerPath := writeTempFile(t, root, "resources/views/layouts/header.tmpl", `{{ define "layouts/header.tmpl" }}
+{{ template "partials/nav.tmpl" . }}
+<header>{{ .supabase_url }}</header>
+{{ end }}`)
+	signinPath := writeTempFile(t, root, "resources/views/auth/signin.tmpl", `{{ define "auth/signin.tmpl" }}
+{{ template "layouts/header.tmpl" . }}
+<link rel="stylesheet" href="/css/app.css">
+<link rel="stylesheet" href="/css/missing.css">
+<a href="/signin">Sign In</a>
+<h1>{{ .title | upper }}</h1>
+<p>{{ .profile.User.Email }}</p>
+{{ with .profile }}
+  <span>{{ .Bio }}</span>
+{{ end }}
+<p>{{ .mutated_key }}</p>
+<p>{{ .supabaseUrl }}</p>
+{{ end }}`)
+	emptyPath := writeTempFile(t, root, "resources/views/layouts/empty.tmpl", ``)
+	orphanPath := writeTempFile(t, root, "resources/views/meetings/room.tmpl", `{{ define "meetings/room.tmpl" }}<div>Room</div>{{ end }}`)
+
+	// 4. Route closure rendering auth/signin.tmpl + Controller using service return type, map mutation & GetShared (P6.2, P6.3, P6.8)
+	routePath := writeTempFile(t, root, "routes/web.go", `package routes
+import (
+	"github.com/goravel/framework/contracts/http"
+	"goravel/app/facades"
+)
+func Web() {
+	facades.Route().Get("/signin", func(ctx http.Context) http.Response {
+		data := map[string]any{
+			"title":        "Welcome",
+			"supabase_url": "https://example.supabase.co",
+		}
+		data["mutated_key"] = "from_mutation"
+		return ctx.Response().View().Make("auth/signin.tmpl", data)
+	})
+}
+`)
+	ctrlPath := writeTempFile(t, root, "app/http/controllers/profile_controller.go", `package controllers
+import (
+	"github.com/goravel/framework/contracts/http"
+	"goravel/app/facades"
+	"goravel/app/services"
+)
+type ProfileController struct {
+	userService *services.UserService
+}
+func (c *ProfileController) Show(ctx http.Context) http.Response {
+	profile, _ := c.userService.GetProfile()
+	_ = facades.View().GetShared()
+	_ = facades.View().RegisteredViews()
+	return ctx.Response().View().Make("auth/signin.tmpl", map[string]any{
+		"profile": profile,
+	})
+}
+`)
+
+	cat := indexer.Build(root)
+	_ = navPath
+	_ = headerPath
+
+	// Verify P6.1: Custom FuncMap indexed from config/http.go
+	if cat.TemplateFuncs["upper"] == nil || cat.TemplateFuncs["default"] == nil {
+		t.Fatalf("expected custom FuncMap functions 'upper' and 'default' indexed, got %+v", cat.TemplateFuncs)
+	}
+	signinBytes, _ := os.ReadFile(signinPath)
+	signinSrc := string(signinBytes)
+	upperOff := strings.Index(signinSrc, "upper") + 2
+	upperHov := framework.TemplateHover(signinPath, signinSrc, cat, upperOff)
+	if upperHov == nil || !strings.Contains(upperHov.Markdown, "Custom Template Function `upper`") {
+		t.Errorf("expected custom FuncMap hover on 'upper', got %+v", upperHov)
+	}
+	upperDefs := framework.TemplateDefinition(signinPath, signinSrc, cat, upperOff)
+	if len(upperDefs) == 0 || filepath.Clean(upperDefs[0].File) != filepath.Clean(httpCfgPath) {
+		t.Errorf("expected Go-to-Definition on 'upper' to jump to config/http.go, got %+v", upperDefs)
+	}
+
+	// Verify P6.2: Route closure linked to RouteItem.View and ViewItem.Callers
+	var signinRoute *indexer.RouteItem
+	for _, rt := range cat.Routes {
+		if rt.Path == "/signin" {
+			signinRoute = rt
+			break
+		}
+	}
+	if signinRoute == nil || signinRoute.View != "auth/signin.tmpl" {
+		t.Fatalf("expected route GET /signin to have View='auth/signin.tmpl', got %+v", signinRoute)
+	}
+	signinVi := cat.LookupView("auth/signin.tmpl")
+	if signinVi == nil || len(signinVi.Callers) < 2 {
+		t.Fatalf("expected auth/signin.tmpl to have both route closure and controller callers, got %+v", signinVi)
+	}
+
+	// Verify P6.3 & P6.8: Go DataMap completion, Fill missing vars CodeAction, and GetShared() hover
+	ctrlBytes, _ := os.ReadFile(ctrlPath)
+	ctrlSrc := string(ctrlBytes)
+	mapOff := strings.Index(ctrlSrc, `"profile": profile,`) + len(`"profile": profile,`)
+	mapComp := framework.ViewCompletions(ctrlPath, ctrlSrc, cat, mapOff)
+	hasNavBrandComp := false
+	for _, it := range mapComp {
+		if it.Label == "nav_brand" {
+			hasNavBrandComp = true
+		}
+	}
+	if !hasNavBrandComp {
+		t.Errorf("expected 2-hop inherited variable 'nav_brand' in Go View().Make map completions, got %+v", mapComp)
+	}
+	fillActions := framework.ViewCodeActions(ctrlPath, ctrlSrc, cat, mapOff)
+	hasFillAction := false
+	for _, act := range fillActions {
+		if strings.Contains(act.Title, "Fill missing template variables") {
+			hasFillAction = true
+		}
+	}
+	if !hasFillAction {
+		t.Errorf("expected 'Fill missing template variables' CodeAction on View().Make map, got %+v", fillActions)
+	}
+	getSharedOff := strings.Index(ctrlSrc, "GetShared") + 3
+	gsHov := framework.ViewHover(ctrlPath, ctrlSrc, cat, getSharedOff)
+	if gsHov == nil || !strings.Contains(gsHov.Markdown, "GetShared()") {
+		t.Errorf("expected hover on facades.View().GetShared(), got %+v", gsHov)
+	}
+
+	// Verify P6.5 & P6.6: Multi-level chain (.profile.User.Email) and scoped with (.Bio)
+	emailOff := strings.Index(signinSrc, ".profile.User.Email") + len(".profile.User.") + 2
+	emailDefs := framework.TemplateDefinition(signinPath, signinSrc, cat, emailOff)
+	if len(emailDefs) == 0 || filepath.Clean(emailDefs[0].File) != filepath.Clean(modelPath) {
+		t.Errorf("expected multi-level .profile.User.Email definition to jump to User model (%s), got %+v", modelPath, emailDefs)
+	}
+	bioOff := strings.Index(signinSrc, ".Bio") + 2
+	bioHov := framework.TemplateHover(signinPath, signinSrc, cat, bioOff)
+	if bioHov == nil || !strings.Contains(bioHov.Markdown, "ProfileResponse") {
+		t.Errorf("expected scoped {{ with .profile }} hover on .Bio to resolve to ProfileResponse, got %+v", bioHov)
+	}
+
+	// Verify P6.8: Map mutation variable (.mutated_key) resolved in .tmpl
+	mutOff := strings.Index(signinSrc, ".mutated_key") + 3
+	mutDefs := framework.TemplateDefinition(signinPath, signinSrc, cat, mutOff)
+	if len(mutDefs) == 0 || filepath.Clean(mutDefs[0].File) != filepath.Clean(routePath) {
+		t.Errorf("expected .mutated_key definition to jump to data[\"mutated_key\"] in routes/web.go, got %+v", mutDefs)
+	}
+
+	// Verify P6.4 & P6.9: Diagnostics in signin.tmpl (fuzzy match .supabaseUrl -> .supabase_url and missing /css/missing.css, but NOT /css/app.css)
+	sDiags := framework.TemplateDiagnostics(signinPath, signinSrc, cat)
+	hasFuzzyDiag, hasMissingAssetDiag := false, false
+	for _, d := range sDiags {
+		if strings.Contains(d.Message, "supabaseUrl") && strings.Contains(d.Message, "supabase_url") {
+			hasFuzzyDiag = true
+		}
+		if strings.Contains(d.Message, "/css/missing.css") {
+			hasMissingAssetDiag = true
+		}
+		if strings.Contains(d.Message, "/css/app.css") {
+			t.Errorf("unexpected diagnostic on existing static asset /css/app.css: %+v", d)
+		}
+	}
+	if !hasFuzzyDiag {
+		t.Errorf("expected fuzzy-match diagnostic for .supabaseUrl -> .supabase_url, got %+v", sDiags)
+	}
+	if !hasMissingAssetDiag {
+		t.Errorf("expected missing static asset diagnostic for /css/missing.css, got %+v", sDiags)
+	}
+
+	// Verify P6.9: HTML Route URL hover & definition on href="/signin"
+	hrefOff := strings.Index(signinSrc, `href="/signin"`) + len(`href="/sig`)
+	hrefHov := framework.TemplateHover(signinPath, signinSrc, cat, hrefOff)
+	if hrefHov == nil || !strings.Contains(hrefHov.Markdown, "Goravel Route `/signin`") {
+		t.Errorf("expected route hover on href=\"/signin\", got %+v", hrefHov)
+	}
+	hrefDefs := framework.TemplateDefinition(signinPath, signinSrc, cat, hrefOff)
+	if len(hrefDefs) == 0 || filepath.Clean(hrefDefs[0].File) != filepath.Clean(routePath) {
+		t.Errorf("expected route definition on href=\"/signin\" to jump to routes/web.go, got %+v", hrefDefs)
+	}
+
+	// Verify P6.7: Empty .tmpl file diagnostic & Quick Fix + Orphaned view CodeLens
+	emptyDiags := framework.TemplateDiagnostics(emptyPath, "", cat)
+	if len(emptyDiags) == 0 || !strings.Contains(emptyDiags[0].Message, "empty") {
+		t.Errorf("expected empty template diagnostic on layouts/empty.tmpl, got %+v", emptyDiags)
+	}
+	emptyActions := framework.TemplateCodeActions(emptyPath, "", cat, 0)
+	if len(emptyActions) == 0 || !strings.Contains(emptyActions[0].Title, "Scaffold") {
+		t.Errorf("expected Scaffold Quick Fix on empty template, got %+v", emptyActions)
+	}
+	orphanLenses := framework.TemplateCodeLenses(orphanPath, cat)
+	hasOrphanLens := false
+	for _, l := range orphanLenses {
+		if strings.Contains(l.Title, "Unreferenced view") {
+			hasOrphanLens = true
+		}
+	}
+	if !hasOrphanLens {
+		t.Errorf("expected Unreferenced view CodeLens on meetings/room.tmpl, got %+v", orphanLenses)
+	}
+
+	// Verify P6.10: TemplateDocumentSymbols
+	syms := framework.TemplateDocumentSymbols(signinPath, signinSrc)
+	if len(syms) < 3 {
+		t.Errorf("expected document symbols for define, template, and with in signin.tmpl, got %+v", syms)
+	}
+}

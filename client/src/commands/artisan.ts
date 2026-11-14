@@ -146,9 +146,73 @@ export function registerArtisanCommands(
     vscode.commands.registerCommand("goravel.artisan.makeTest", () =>
       promptAndRun("make:test", "Test name (e.g. UserTest)")
     ),
-    vscode.commands.registerCommand("goravel.artisan.makeView", () =>
-      promptAndRun("make:view", "View name (e.g. admin/dashboard.tmpl)")
-    ),
+    vscode.commands.registerCommand("goravel.artisan.makeView", async (uri?: vscode.Uri) => {
+      const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      let prefill = "";
+      if (uri?.fsPath && ws) {
+        const viewsRoot = path.join(ws, "resources", "views");
+        if (uri.fsPath.startsWith(viewsRoot)) {
+          const stat = fs.existsSync(uri.fsPath) ? fs.statSync(uri.fsPath) : undefined;
+          const folder = stat?.isDirectory() ? uri.fsPath : path.dirname(uri.fsPath);
+          const rel = path.relative(viewsRoot, folder).replace(/\\/g, "/");
+          if (rel && !rel.startsWith(".")) {
+            prefill = `${rel}/`;
+          }
+        }
+      }
+      const rawName = await vscode.window.showInputBox({
+        title: "Goravel Artisan: make:view",
+        prompt: "View path relative to resources/views/ (e.g. admin/dashboard.tmpl)",
+        value: prefill,
+        placeHolder: "admin/dashboard.tmpl",
+      });
+      if (!rawName || !rawName.trim()) return;
+      let relView = rawName.trim().replace(/^\/+/, "");
+      if (!path.extname(relView)) {
+        relView += ".tmpl";
+      }
+      if (!ws) {
+        runArtisanInTerminal(`make:view ${relView}`);
+        return;
+      }
+      const mode = await vscode.window.showQuickPick(
+        [
+          {
+            label: "$(layout) Page with Header & Footer Partials",
+            description: "Includes layouts/header.tmpl and layouts/footer.tmpl",
+            id: "layout",
+          },
+          {
+            label: "$(file-code) Standalone {{ define }} Block",
+            description: "Minimal Goravel template block",
+            id: "standalone",
+          },
+          {
+            label: "$(terminal) Run `artisan make:view` in Terminal",
+            description: `go run . artisan make:view ${relView}`,
+            id: "cli",
+          },
+        ],
+        { placeHolder: `Select template scaffolding style for ${relView}` }
+      );
+      if (!mode) return;
+      if (mode.id === "cli") {
+        runArtisanInTerminal(`make:view ${relView}`);
+        return;
+      }
+      const fullPath = path.join(ws, "resources", "views", ...relView.split("/"));
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      const content =
+        mode.id === "layout"
+          ? `{{ define "${relView}" }}\n{{ template "layouts/header.tmpl" . }}\n<main class="container mx-auto py-6">\n  <h1>{{ .title }}</h1>\n</main>\n{{ template "layouts/footer.tmpl" . }}\n{{ end }}\n`
+          : `{{ define "${relView}" }}\n<div>\n  <h1>{{ .title }}</h1>\n</div>\n{{ end }}\n`;
+      if (!fs.existsSync(fullPath)) {
+        fs.writeFileSync(fullPath, content, "utf8");
+      }
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fullPath));
+      await vscode.window.showTextDocument(doc, { preview: false });
+      await vscode.commands.executeCommand("goravel.refreshViews");
+    }),
     vscode.commands.registerCommand("goravel.artisan.migrate", () => runArtisanInTerminal("migrate")),
     vscode.commands.registerCommand("goravel.artisan.migrateRollback", () => runArtisanInTerminal("migrate:rollback")),
     vscode.commands.registerCommand("goravel.artisan.seedSpecific", async () => {

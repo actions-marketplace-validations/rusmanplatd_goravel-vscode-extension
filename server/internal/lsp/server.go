@@ -152,15 +152,16 @@ func (s *Server) dispatch(m *message) {
 		s.reindex()
 		s.reply(m.ID, map[string]any{
 			"capabilities": map[string]any{
-				"textDocumentSync":   1,
-				"completionProvider": map[string]any{"triggerCharacters": []string{".", "$", " ", "\"", "|", ":", ","}},
-				"hoverProvider":      true,
-				"definitionProvider": true,
-				"referencesProvider": true,
-				"renameProvider":     true,
-				"codeActionProvider": true,
-				"codeLensProvider":   map[string]any{"resolveProvider": false},
-				"inlayHintProvider":  true,
+				"textDocumentSync":       1,
+				"completionProvider":     map[string]any{"triggerCharacters": []string{".", "$", " ", "\"", "|", ":", ",", "/"}},
+				"hoverProvider":          true,
+				"definitionProvider":     true,
+				"referencesProvider":     true,
+				"renameProvider":         true,
+				"codeActionProvider":     true,
+				"codeLensProvider":       map[string]any{"resolveProvider": false},
+				"inlayHintProvider":      true,
+				"documentSymbolProvider": true,
 				"semanticTokensProvider": map[string]any{
 					"legend": map[string]any{
 						"tokenTypes":     rawsql.SemanticTokenTypes,
@@ -169,7 +170,7 @@ func (s *Server) dispatch(m *message) {
 					"full": true,
 				},
 			},
-			"serverInfo": map[string]any{"name": "goravel-lsp", "version": "0.6.0"},
+			"serverInfo": map[string]any{"name": "goravel-lsp", "version": "0.7.0"},
 		})
 	case "shutdown":
 		s.reply(m.ID, nil)
@@ -257,6 +258,8 @@ func (s *Server) dispatch(m *message) {
 		s.reply(m.ID, s.codeLens(m.Params))
 	case "textDocument/inlayHint":
 		s.reply(m.ID, s.inlayHint(m.Params))
+	case "textDocument/documentSymbol":
+		s.reply(m.ID, s.documentSymbol(m.Params))
 	case "textDocument/semanticTokens/full":
 		s.reply(m.ID, s.semanticTokens(m.Params))
 	case "goravel/overview":
@@ -1119,12 +1122,26 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 	_ = json.Unmarshal(raw, &p)
 	uri := p.TextDocument.URI
 	text, ok := s.docs[uri]
-	if !ok || !strings.HasSuffix(uri, ".go") {
+	if !ok {
 		return nil
 	}
 	path := uriToPath(uri)
-	fa := orm.AnalyzeFile(path, []byte(text), s.cat)
 	var hints []map[string]any
+	if framework.IsTemplateFile(path) {
+		for _, h := range framework.TemplateInlayHints(path, text, s.cat) {
+			hints = append(hints, map[string]any{
+				"position":    offsetToPos(text, h.Offset),
+				"label":       h.Label,
+				"kind":        1, // Type
+				"paddingLeft": false,
+			})
+		}
+		return hints
+	}
+	if !strings.HasSuffix(uri, ".go") {
+		return nil
+	}
+	fa := orm.AnalyzeFile(path, []byte(text), s.cat)
 	for _, h := range fa.InlayHints(s.cat) {
 		hints = append(hints, map[string]any{
 			"position":    offsetToPos(text, h.Offset),
@@ -1149,7 +1166,50 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 			"paddingLeft": true,
 		})
 	}
+	for _, h := range framework.ViewInlayHints(path, text, s.cat) {
+		hints = append(hints, map[string]any{
+			"position":    offsetToPos(text, h.Offset),
+			"label":       h.Label,
+			"kind":        2,
+			"paddingLeft": true,
+		})
+	}
 	return hints
+}
+
+func (s *Server) documentSymbol(raw json.RawMessage) any {
+	var p struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	uri := p.TextDocument.URI
+	path := uriToPath(uri)
+	if !framework.IsTemplateFile(path) {
+		return nil
+	}
+	text, ok := s.docs[uri]
+	if !ok {
+		if b, err := os.ReadFile(path); err == nil {
+			text = string(b)
+		}
+	}
+	var out []map[string]any
+	for _, sym := range framework.TemplateDocumentSymbols(path, text) {
+		r := Range{
+			Start: Position{sym.StartLine, sym.StartCol},
+			End:   Position{sym.EndLine, sym.EndCol},
+		}
+		out = append(out, map[string]any{
+			"name":           sym.Name,
+			"detail":         sym.Detail,
+			"kind":           sym.Kind,
+			"range":          r,
+			"selectionRange": r,
+		})
+	}
+	return out
 }
 
 func (s *Server) semanticTokens(raw json.RawMessage) any {
@@ -1216,20 +1276,50 @@ func (s *Server) overview() any {
 	for _, r := range s.cat.RuleNames() {
 		rules = append(rules, s.cat.Rule(r))
 	}
+	var views []*indexer.ViewItem
+	var viewNames []string
+	for k := range s.cat.ViewItems {
+		viewNames = append(viewNames, k)
+	}
+	sort.Strings(viewNames)
+	for _, k := range viewNames {
+		views = append(views, s.cat.ViewItems[k])
+	}
+	var sharedViewVars []indexer.ViewVar
+	var sharedKeys []string
+	for k := range s.cat.SharedViewVars {
+		sharedKeys = append(sharedKeys, k)
+	}
+	sort.Strings(sharedKeys)
+	for _, k := range sharedKeys {
+		sharedViewVars = append(sharedViewVars, s.cat.SharedViewVars[k]...)
+	}
+	var templateFuncs []*indexer.TemplateFuncItem
+	var fnNames []string
+	for k := range s.cat.TemplateFuncs {
+		fnNames = append(fnNames, k)
+	}
+	sort.Strings(fnNames)
+	for _, k := range fnNames {
+		templateFuncs = append(templateFuncs, s.cat.TemplateFuncs[k])
+	}
 	return map[string]any{
-		"tables":       tables,
-		"routes":       s.cat.Routes,
-		"migrations":   s.cat.Migrations,
-		"configs":      configs,
-		"rules":        rules,
-		"commands":     s.cat.Commands,
-		"seeders":      s.cat.Seeders,
-		"schedules":    s.cat.Schedules,
-		"events":       s.cat.Events,
-		"jobs":         s.cat.Jobs,
-		"observers":    s.cat.Observers,
-		"scopes":       s.cat.Scopes,
-		"unregistered": s.cat.Unregistered,
+		"tables":         tables,
+		"routes":         s.cat.Routes,
+		"migrations":     s.cat.Migrations,
+		"configs":        configs,
+		"rules":          rules,
+		"commands":       s.cat.Commands,
+		"seeders":        s.cat.Seeders,
+		"schedules":      s.cat.Schedules,
+		"events":         s.cat.Events,
+		"jobs":           s.cat.Jobs,
+		"observers":      s.cat.Observers,
+		"scopes":         s.cat.Scopes,
+		"views":          views,
+		"sharedViewVars": sharedViewVars,
+		"templateFuncs":  templateFuncs,
+		"unregistered":   s.cat.Unregistered,
 	}
 }
 

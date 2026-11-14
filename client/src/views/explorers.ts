@@ -44,8 +44,53 @@ export interface RouteInfo {
   controller: string;
   action: string;
   module: string;
+  view?: string;
   loc: Loc;
   ctrlLoc: Loc;
+}
+
+export interface ViewCallerInfo {
+  viewName: string;
+  method: string;
+  controller?: string;
+  route?: string;
+  loc: Loc;
+}
+
+export interface TemplateIncludeInfo {
+  target: string;
+  passDot: boolean;
+  contextExpr?: string;
+  loc: Loc;
+}
+
+export interface ViewItemInfo {
+  name: string;
+  relDisplay: string;
+  source: string;
+  loc: Loc;
+  packageLocs?: Loc[];
+  defineName?: string;
+  includes?: TemplateIncludeInfo[];
+  includedBy?: string[];
+  usedVars?: string[];
+  isEmpty?: boolean;
+  callers?: ViewCallerInfo[];
+}
+
+export interface SharedViewVarInfo {
+  key: string;
+  valueExpr: string;
+  goType?: string;
+  controller?: string;
+  loc: Loc;
+}
+
+export interface TemplateFuncInfo {
+  name: string;
+  signature: string;
+  returnType?: string;
+  loc: Loc;
 }
 
 export interface MigrationInfo {
@@ -116,6 +161,9 @@ export interface OverviewData {
   events?: EventInfo[];
   jobs?: JobInfo[];
   observers?: ObserverInfo[];
+  views?: ViewItemInfo[];
+  sharedViewVars?: SharedViewVarInfo[];
+  templateFuncs?: TemplateFuncInfo[];
   unregistered?: UnregisteredInfo[];
 }
 
@@ -218,7 +266,7 @@ export class RoutesTreeProvider implements vscode.TreeDataProvider<RouteNode> {
     }
     const r = el.route;
     const item = new vscode.TreeItem(`${r.method} ${r.path}`, vscode.TreeItemCollapsibleState.None);
-    item.description = r.handler;
+    item.description = r.view && !r.handler.includes(r.view) ? `${r.handler} → ${r.view}` : r.handler;
     item.iconPath = new vscode.ThemeIcon(r.method === "gRPC" ? "symbol-interface" : "globe");
     item.contextValue = "goravelRoute";
     item.command = openCmd(r.ctrlLoc?.file ? r.ctrlLoc : r.loc);
@@ -471,4 +519,141 @@ export class CommandsTreeProvider implements vscode.TreeDataProvider<CommandNode
     return [];
   }
 }
+
+// ---- Views & Templates Explorer ----
+
+type ViewExplorerNode =
+  | { kind: "section"; id: "appViews" | "pkgViews" | "sharedVars" | "templateFuncs"; label: string; count: number }
+  | { kind: "view"; view: ViewItemInfo }
+  | { kind: "caller"; caller: ViewCallerInfo }
+  | { kind: "include"; inc: TemplateIncludeInfo }
+  | { kind: "sharedVar"; sv: SharedViewVarInfo }
+  | { kind: "templateFunc"; fn: TemplateFuncInfo };
+
+export class ViewsTreeProvider implements vscode.TreeDataProvider<ViewExplorerNode> {
+  private _onDidChangeTreeData = new vscode.EventEmitter<ViewExplorerNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+  private views: ViewItemInfo[] = [];
+  private sharedVars: SharedViewVarInfo[] = [];
+  private templateFuncs: TemplateFuncInfo[] = [];
+
+  setData(views?: ViewItemInfo[], sharedVars?: SharedViewVarInfo[], templateFuncs?: TemplateFuncInfo[]) {
+    this.views = views || [];
+    this.sharedVars = sharedVars || [];
+    this.templateFuncs = templateFuncs || [];
+    this._onDidChangeTreeData.fire();
+  }
+
+  getTreeItem(el: ViewExplorerNode): vscode.TreeItem {
+    if (el.kind === "section") {
+      const item = new vscode.TreeItem(
+        el.label,
+        el.count > 0 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+      );
+      item.description = `${el.count}`;
+      item.iconPath = new vscode.ThemeIcon(
+        el.id === "appViews"
+          ? "file-code"
+          : el.id === "pkgViews"
+            ? "package"
+            : el.id === "sharedVars"
+              ? "symbol-variable"
+              : "symbol-function"
+      );
+      return item;
+    }
+    if (el.kind === "view") {
+      const v = el.view;
+      const hasChildren = (v.callers?.length || 0) > 0 || (v.includes?.length || 0) > 0;
+      const item = new vscode.TreeItem(
+        v.name,
+        hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+      );
+      const badges: string[] = [];
+      if (v.isEmpty) badges.push("empty");
+      if (v.packageLocs?.length) badges.push("overrides pkg");
+      if (v.callers?.length) badges.push(`${v.callers.length} caller(s)`);
+      else if (v.includedBy?.length) badges.push(`included by ${v.includedBy.length}`);
+      else badges.push("0 callers");
+      if (v.usedVars?.length) badges.push(`${v.usedVars.length} vars`);
+      item.description = badges.join(" · ");
+      item.tooltip = `${v.relDisplay}${v.usedVars?.length ? `\nVariables: .${v.usedVars.join(", .")}` : ""}`;
+      item.iconPath = new vscode.ThemeIcon(v.isEmpty ? "warning" : v.packageLocs?.length ? "layers" : "file-code");
+      item.command = openCmd(v.loc);
+      return item;
+    }
+    if (el.kind === "caller") {
+      const c = el.caller;
+      const lbl = c.route ? `${c.route} (${c.controller || c.method})` : `${c.controller || c.method}`;
+      const item = new vscode.TreeItem(lbl, vscode.TreeItemCollapsibleState.None);
+      item.description = `View().${c.method}`;
+      item.iconPath = new vscode.ThemeIcon(c.route ? "globe" : "symbol-method");
+      item.command = openCmd(c.loc);
+      return item;
+    }
+    if (el.kind === "include") {
+      const inc = el.inc;
+      const item = new vscode.TreeItem(`{{ template "${inc.target}" }}`, vscode.TreeItemCollapsibleState.None);
+      item.description = inc.contextExpr || "";
+      item.iconPath = new vscode.ThemeIcon("references");
+      item.command = openCmd(inc.loc);
+      return item;
+    }
+    if (el.kind === "sharedVar") {
+      const sv = el.sv;
+      const item = new vscode.TreeItem(`.${sv.key}`, vscode.TreeItemCollapsibleState.None);
+      item.description = `${sv.valueExpr}${sv.controller ? ` (${sv.controller})` : ""}`;
+      item.iconPath = new vscode.ThemeIcon("symbol-variable");
+      item.command = openCmd(sv.loc);
+      return item;
+    }
+    const fn = el.fn;
+    const item = new vscode.TreeItem(fn.name, vscode.TreeItemCollapsibleState.None);
+    item.description = fn.signature;
+    item.iconPath = new vscode.ThemeIcon("symbol-function");
+    item.command = openCmd(fn.loc);
+    return item;
+  }
+
+  getChildren(el?: ViewExplorerNode): ViewExplorerNode[] {
+    if (!el) {
+      const appViews = this.views.filter((v) => v.source !== "package");
+      const pkgViews = this.views.filter((v) => v.source === "package");
+      const sections: ViewExplorerNode[] = [
+        { kind: "section", id: "appViews", label: "App Views (resources/views)", count: appViews.length },
+      ];
+      if (pkgViews.length > 0) {
+        sections.push({ kind: "section", id: "pkgViews", label: "Package Views (LoadViewsFrom)", count: pkgViews.length });
+      }
+      if (this.sharedVars.length > 0) {
+        sections.push({ kind: "section", id: "sharedVars", label: "Shared Variables (View().Share)", count: this.sharedVars.length });
+      }
+      if (this.templateFuncs.length > 0) {
+        sections.push({ kind: "section", id: "templateFuncs", label: "Custom FuncMap Functions", count: this.templateFuncs.length });
+      }
+      return sections;
+    }
+    if (el.kind === "section") {
+      if (el.id === "appViews") {
+        return this.views.filter((v) => v.source !== "package").map((view) => ({ kind: "view", view }));
+      }
+      if (el.id === "pkgViews") {
+        return this.views.filter((v) => v.source === "package").map((view) => ({ kind: "view", view }));
+      }
+      if (el.id === "sharedVars") {
+        return this.sharedVars.map((sv) => ({ kind: "sharedVar", sv }));
+      }
+      if (el.id === "templateFuncs") {
+        return this.templateFuncs.map((fn) => ({ kind: "templateFunc", fn }));
+      }
+    }
+    if (el.kind === "view") {
+      const callers: ViewExplorerNode[] = (el.view.callers || []).map((caller) => ({ kind: "caller", caller }));
+      const incs: ViewExplorerNode[] = (el.view.includes || []).map((inc) => ({ kind: "include", inc }));
+      return [...callers, ...incs];
+    }
+    return [];
+  }
+}
+
 

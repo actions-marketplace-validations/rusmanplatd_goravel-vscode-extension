@@ -221,12 +221,13 @@ type RouteItem struct {
 	Path        string   `json:"path"`       // e.g. "/api/geo/cities"
 	Params      []string `json:"params,omitempty"`
 	Middlewares []string `json:"middlewares,omitempty"`
-	Handler     string   `json:"handler"`    // e.g. "CityController.Index"
-	Controller  string   `json:"controller"` // e.g. "CityController"
-	Action      string   `json:"action"`     // e.g. "Index"
-	Module      string   `json:"module"`     // e.g. "api_geo_app"
-	Loc         Location `json:"loc"`        // route registration line
-	CtrlLoc     Location `json:"ctrlLoc"`    // controller method line
+	Handler     string   `json:"handler"`        // e.g. "CityController.Index"
+	Controller  string   `json:"controller"`     // e.g. "CityController"
+	Action      string   `json:"action"`         // e.g. "Index"
+	Module      string   `json:"module"`         // e.g. "api_geo_app"
+	View        string   `json:"view,omitempty"` // e.g. "auth/signin.tmpl"
+	Loc         Location `json:"loc"`            // route registration line
+	CtrlLoc     Location `json:"ctrlLoc"`        // controller method line
 }
 
 // CommandItem describes a custom Artisan command in app/console/commands/*.go.
@@ -327,9 +328,29 @@ type ScopeItem struct {
 
 // TemplateInclude describes a {{ template "..." }} or {{ block "..." }} inclusion inside a template.
 type TemplateInclude struct {
-	Target  string   `json:"target"`
-	PassDot bool     `json:"passDot"`
+	Target      string   `json:"target"`
+	PassDot     bool     `json:"passDot"`
+	ContextExpr string   `json:"contextExpr,omitempty"`
+	Loc         Location `json:"loc"`
+}
+
+// TemplateDefine describes a {{ define "name" }} block inside a template file.
+type TemplateDefine struct {
+	Name    string   `json:"name"`
 	Loc     Location `json:"loc"`
+	EndLine int      `json:"endLine"`
+}
+
+// TemplateFuncItem describes a custom template.FuncMap function registered in config/http.go or service providers.
+type TemplateFuncItem struct {
+	Name       string   `json:"name"`
+	Signature  string   `json:"signature"`
+	Params     []string `json:"params,omitempty"`
+	ReturnType string   `json:"returnType,omitempty"`
+	MinArgs    int      `json:"minArgs"`
+	Variadic   bool     `json:"variadic"`
+	Doc        string   `json:"doc,omitempty"`
+	Loc        Location `json:"loc"`
 }
 
 // ViewCaller describes a Go call site (Make, First, Exists, path.View) referencing a view.
@@ -350,9 +371,13 @@ type ViewItem struct {
 	PackageLocs []Location        `json:"packageLocs,omitempty"` // fallback/overridden package locations
 	DefineName  string            `json:"defineName,omitempty"`  // name in {{ define "..." }}
 	DefineLoc   Location          `json:"defineLoc,omitempty"`
+	Defines     []TemplateDefine  `json:"defines,omitempty"`
 	Includes    []TemplateInclude `json:"includes,omitempty"`
+	IncludedBy  []string          `json:"includedBy,omitempty"`
 	UsedVars    []string          `json:"usedVars,omitempty"`
+	DirectVars  []string          `json:"directVars,omitempty"`
 	PassesDot   bool              `json:"passesDot,omitempty"`
+	IsEmpty     bool              `json:"isEmpty,omitempty"`
 	Callers     []ViewCaller      `json:"callers,omitempty"`
 }
 
@@ -412,6 +437,8 @@ type Catalog struct {
 	ViewItems          map[string]*ViewItem                   // relative view path -> rich ViewItem metadata
 	ViewVars           map[string][]ViewVar                   // view name -> passed template variables
 	SharedViewVars     map[string][]ViewVar                   // key -> global shared variables from View().Share(key, val)
+	TemplateFuncs      map[string]*TemplateFuncItem           // custom template.FuncMap functions
+	FuncReturns        map[string]string                      // function/method name -> return struct/model type
 	PackageViewDirs    []string                               // absolute paths registered via LoadViewsFrom
 	Middleware         map[string]Location                    // middleware name -> Location
 	Seeders            []*SeederItem                          // database seeders
@@ -442,6 +469,8 @@ func NewCatalog() *Catalog {
 		ViewItems:          map[string]*ViewItem{},
 		ViewVars:           map[string][]ViewVar{},
 		SharedViewVars:     map[string][]ViewVar{},
+		TemplateFuncs:      map[string]*TemplateFuncItem{},
+		FuncReturns:        map[string]string{},
 		Middleware:         map[string]Location{},
 		Translations:       map[string]map[string]TranslationEntry{},
 		Gates:              map[string]*GateItem{},
@@ -579,6 +608,13 @@ func (c *Catalog) LookupView(name string) *ViewItem {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.lookupViewUnlocked(name)
+}
+
+func (c *Catalog) lookupViewUnlocked(name string) *ViewItem {
+	if c == nil || name == "" {
+		return nil
+	}
 	clean := strings.TrimPrefix(strings.TrimSpace(strings.ReplaceAll(name, "\\", "/")), "/")
 	if vi := c.ViewItems[clean]; vi != nil {
 		return vi
@@ -591,6 +627,11 @@ func (c *Catalog) LookupView(name string) *ViewItem {
 	for _, vi := range c.ViewItems {
 		if vi.DefineName == clean || strings.TrimSuffix(vi.Name, ".tmpl") == clean || strings.TrimSuffix(vi.Name, ".html") == clean || strings.TrimSuffix(vi.Name, ".gohtml") == clean {
 			return vi
+		}
+		for _, d := range vi.Defines {
+			if d.Name == clean || d.Name == name {
+				return vi
+			}
 		}
 	}
 	return nil

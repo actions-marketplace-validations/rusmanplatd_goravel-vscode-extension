@@ -23,11 +23,14 @@ var (
 )
 
 func indexViews(c *Catalog, root string) {
-	// 1. Collect Go files across app, bootstrap, packages, routes, and tests
+	// 1. Collect Go files across config, app, bootstrap, packages, routes, and tests
 	var files []*parsedFile
-	for _, sub := range []string{"app", "bootstrap", "packages", "routes", "tests"} {
+	for _, sub := range []string{"config", "app", "bootstrap", "packages", "routes", "tests"} {
 		files = append(files, walkGoFiles(filepath.Join(root, sub))...)
 	}
+
+	// 1b. Index custom template.FuncMap functions in config/http.go, providers, etc.
+	indexTemplateFuncs(c, files)
 
 	// 2. Discover package view directories from facades.View().LoadViewsFrom(...)
 	seenPkgDirs := map[string]bool{}
@@ -112,7 +115,41 @@ func indexViews(c *Catalog, root string) {
 
 			localTypes := map[string]string{}
 			localMaps := map[string]*ast.CompositeLit{}
-			collectLocalVarsAndMaps(fd.Body, localTypes, localMaps, c)
+			localMapMut := map[string][]mapMutation{}
+			collectLocalVarsAndMaps(pf, fd.Body, localTypes, localMaps, localMapMut, c)
+
+			resolveCallContext := func(pos token.Pos, viewName string) (string, string) {
+				callCtrl := ctrlLabel
+				callRoute := routeForCtrl
+				callLoc := loc(pf, pos)
+				if fd.Recv != nil {
+					rName := recvName(fd.Recv)
+					for _, rt := range c.Routes {
+						if rt.Controller == rName && rt.Action == fd.Name.Name {
+							if rt.View == "" && viewName != "" {
+								rt.View = viewName
+							}
+						}
+					}
+				} else {
+					var bestRt *RouteItem
+					for _, rt := range c.Routes {
+						if filepath.Clean(rt.Loc.File) == filepath.Clean(pf.path) && rt.Loc.Line <= callLoc.Line {
+							if bestRt == nil || rt.Loc.Line >= bestRt.Loc.Line {
+								bestRt = rt
+							}
+						}
+					}
+					if bestRt != nil {
+						callRoute = bestRt.Method + " " + bestRt.Path
+						callCtrl = "Route Closure (" + callRoute + ")"
+						if bestRt.View == "" && viewName != "" {
+							bestRt.View = viewName
+						}
+					}
+				}
+				return callCtrl, callRoute
+			}
 
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
@@ -134,11 +171,12 @@ func indexViews(c *Catalog, root string) {
 					}
 					if len(parts) > 0 {
 						vn := filepath.ToSlash(strings.Join(parts, "/"))
+						cLbl, rLbl := resolveCallContext(call.Args[0].Pos(), "")
 						recordViewCaller(c, vn, ViewCaller{
 							ViewName:   vn,
 							Method:     "PathView",
-							Controller: ctrlLabel,
-							Route:      routeForCtrl,
+							Controller: cLbl,
+							Route:      rLbl,
 							Loc:        loc(pf, call.Args[0].Pos()),
 						})
 					}
@@ -167,11 +205,12 @@ func indexViews(c *Catalog, root string) {
 					}
 				case "Exists":
 					if vn := stringLitValue(call.Args[0]); vn != "" {
+						cLbl, rLbl := resolveCallContext(call.Args[0].Pos(), "")
 						recordViewCaller(c, vn, ViewCaller{
 							ViewName:   vn,
 							Method:     "Exists",
-							Controller: ctrlLabel,
-							Route:      routeForCtrl,
+							Controller: cLbl,
+							Route:      rLbl,
 							Loc:        loc(pf, call.Args[0].Pos()),
 						})
 					}
@@ -180,17 +219,16 @@ func indexViews(c *Catalog, root string) {
 					if vn == "" {
 						return true
 					}
+					cLbl, rLbl := resolveCallContext(call.Args[0].Pos(), vn)
 					recordViewCaller(c, vn, ViewCaller{
 						ViewName:   vn,
 						Method:     "Make",
-						Controller: ctrlLabel,
-						Route:      routeForCtrl,
+						Controller: cLbl,
+						Route:      rLbl,
 						Loc:        loc(pf, call.Args[0].Pos()),
 					})
 					if len(call.Args) >= 2 {
-						if cl := resolveMapCompositeLit(call.Args[1], localMaps); cl != nil {
-							recordViewVarsFromMap(c, pf, []string{vn}, cl, ctrlLabel, localTypes)
-						}
+						recordViewDataArg(c, pf, []string{vn}, call.Args[1], cLbl, localTypes, localMaps, localMapMut)
 					}
 				case "First":
 					var viewNames []string
@@ -198,20 +236,20 @@ func indexViews(c *Catalog, root string) {
 						for _, elt := range sliceLit.Elts {
 							if vn := stringLitValue(elt); vn != "" {
 								viewNames = append(viewNames, vn)
+								cLbl, rLbl := resolveCallContext(elt.Pos(), vn)
 								recordViewCaller(c, vn, ViewCaller{
 									ViewName:   vn,
 									Method:     "First",
-									Controller: ctrlLabel,
-									Route:      routeForCtrl,
+									Controller: cLbl,
+									Route:      rLbl,
 									Loc:        loc(pf, elt.Pos()),
 								})
 							}
 						}
 					}
 					if len(viewNames) > 0 && len(call.Args) >= 2 {
-						if cl := resolveMapCompositeLit(call.Args[1], localMaps); cl != nil {
-							recordViewVarsFromMap(c, pf, viewNames, cl, ctrlLabel, localTypes)
-						}
+						cLbl, _ := resolveCallContext(call.Args[0].Pos(), viewNames[0])
+						recordViewDataArg(c, pf, viewNames, call.Args[1], cLbl, localTypes, localMaps, localMapMut)
 					}
 				}
 				return true
@@ -263,8 +301,10 @@ func walkAndIndexViewDir(c *Catalog, root, viewDir, source string) {
 }
 
 func parseTemplateMetadata(vi *ViewItem, filePath, src string) {
+	vi.IsEmpty = strings.TrimSpace(src) == ""
 	seenVars := map[string]bool{}
 	matches := tmplActionRe.FindAllStringSubmatchIndex(src, -1)
+	var openDefines []int
 	for _, m := range matches {
 		bodyStart, bodyEnd := m[2], m[3]
 		body := src[bodyStart:bodyEnd]
@@ -276,27 +316,44 @@ func parseTemplateMetadata(vi *ViewItem, filePath, src string) {
 			nameStart := bodyStart + dm[2]
 			defName := src[nameStart : bodyStart+dm[3]]
 			line, col := offsetToLineCol(src, nameStart)
+			defLoc := Location{File: filePath, Line: line, Col: col}
 			if vi.DefineName == "" {
 				vi.DefineName = defName
-				vi.DefineLoc = Location{File: filePath, Line: line, Col: col}
+				vi.DefineLoc = defLoc
 			}
+			vi.Defines = append(vi.Defines, TemplateDefine{
+				Name:    defName,
+				Loc:     defLoc,
+				EndLine: line,
+			})
+			openDefines = append(openDefines, len(vi.Defines)-1)
+			continue
+		}
+		if trimmed == "end" && len(openDefines) > 0 {
+			endLine, _ := offsetToLineCol(src, bodyStart)
+			idx := openDefines[len(openDefines)-1]
+			vi.Defines[idx].EndLine = endLine
+			openDefines = openDefines[:len(openDefines)-1]
 			continue
 		}
 		if im := tmplIncludeRe.FindStringSubmatchIndex(body); im != nil {
 			nameStart := bodyStart + im[2]
 			target := src[nameStart : bodyStart+im[3]]
 			passDot := false
+			ctxExpr := ""
 			if im[4] >= 0 && im[5] >= 0 {
 				argStr := strings.TrimSpace(src[bodyStart+im[4] : bodyStart+im[5]])
-				if argStr == "." || argStr == "$" || strings.HasPrefix(argStr, ".") {
+				ctxExpr = argStr
+				if argStr == "." || argStr == "$" || strings.HasPrefix(argStr, ".") || strings.HasPrefix(argStr, "$.") {
 					passDot = true
 				}
 			}
 			line, col := offsetToLineCol(src, nameStart)
 			vi.Includes = append(vi.Includes, TemplateInclude{
-				Target:  target,
-				PassDot: passDot,
-				Loc:     Location{File: filePath, Line: line, Col: col},
+				Target:      target,
+				PassDot:     passDot,
+				ContextExpr: ctxExpr,
+				Loc:         Location{File: filePath, Line: line, Col: col},
 			})
 			continue
 		}
@@ -304,6 +361,7 @@ func parseTemplateMetadata(vi *ViewItem, filePath, src string) {
 			vName := vm[1]
 			if vName != "" && !seenVars[vName] {
 				seenVars[vName] = true
+				vi.DirectVars = append(vi.DirectVars, vName)
 				vi.UsedVars = append(vi.UsedVars, vName)
 			}
 		}
@@ -373,7 +431,113 @@ func resolveViewDirExpr(root, fileDir string, expr ast.Expr) string {
 	return ""
 }
 
-func collectLocalVarsAndMaps(body *ast.BlockStmt, localTypes map[string]string, localMaps map[string]*ast.CompositeLit, c *Catalog) {
+type mapMutation struct {
+	key string
+	val ast.Expr
+	loc Location
+}
+
+func indexTemplateFuncs(c *Catalog, files []*parsedFile) {
+	for _, pf := range files {
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			typeName := exprString(cl.Type)
+			if !strings.HasSuffix(typeName, "FuncMap") {
+				return true
+			}
+			for _, elt := range cl.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				fnName := stringLitValue(kv.Key)
+				if fnName == "" {
+					continue
+				}
+				item := &TemplateFuncItem{
+					Name:      fnName,
+					Signature: "func(...any) any",
+					Loc:       loc(pf, kv.Key.Pos()),
+				}
+				if fl, ok := kv.Value.(*ast.FuncLit); ok && fl.Type != nil {
+					params, retType, minArgs, variadic, sig := describeFuncType(fl.Type)
+					item.Params = params
+					item.ReturnType = retType
+					item.MinArgs = minArgs
+					item.Variadic = variadic
+					item.Signature = sig
+				}
+				c.TemplateFuncs[fnName] = item
+			}
+			return true
+		})
+	}
+}
+
+func describeFuncType(ft *ast.FuncType) (params []string, retType string, minArgs int, variadic bool, sig string) {
+	if ft.Params != nil {
+		for _, f := range ft.Params.List {
+			pType := exprString(f.Type)
+			isVar := false
+			if _, ok := f.Type.(*ast.Ellipsis); ok {
+				isVar = true
+				variadic = true
+				pType = "..." + exprString(f.Type.(*ast.Ellipsis).Elt)
+			}
+			if len(f.Names) == 0 {
+				params = append(params, pType)
+				if !isVar {
+					minArgs++
+				}
+			} else {
+				for _, n := range f.Names {
+					params = append(params, n.Name+" "+pType)
+					if !isVar {
+						minArgs++
+					}
+				}
+			}
+		}
+	}
+	if ft.Results != nil && len(ft.Results.List) > 0 {
+		var rets []string
+		for _, r := range ft.Results.List {
+			rets = append(rets, exprString(r.Type))
+		}
+		retType = strings.Join(rets, ", ")
+	}
+	sig = "func(" + strings.Join(params, ", ") + ")"
+	if retType != "" {
+		sig += " " + retType
+	}
+	return
+}
+
+func collectLocalVarsAndMaps(pf *parsedFile, body *ast.BlockStmt, localTypes map[string]string, localMaps map[string]*ast.CompositeLit, localMapMut map[string][]mapMutation, c *Catalog) {
+	// Include struct fields of receiver if available in file
+	for _, d := range pf.file.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+		for _, sp := range gd.Specs {
+			ts, ok := sp.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			if st, ok := ts.Type.(*ast.StructType); ok && st.Fields != nil {
+				for _, f := range st.Fields.List {
+					ft := cleanModelType(exprString(f.Type))
+					for _, n := range f.Names {
+						localTypes["field:"+n.Name] = ft
+					}
+				}
+			}
+		}
+	}
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch stmt := n.(type) {
 		case *ast.DeclStmt:
@@ -386,7 +550,11 @@ func collectLocalVarsAndMaps(body *ast.BlockStmt, localTypes map[string]string, 
 				if !ok {
 					continue
 				}
-				tName := cleanModelType(exprString(vs.Type))
+				rawType := exprString(vs.Type)
+				tName := cleanModelType(rawType)
+				if strings.HasPrefix(strings.TrimSpace(rawType), "[]") && tName != "" {
+					tName = "[]" + tName
+				}
 				for i, ident := range vs.Names {
 					if tName != "" {
 						localTypes[ident.Name] = tName
@@ -404,6 +572,18 @@ func collectLocalVarsAndMaps(body *ast.BlockStmt, localTypes map[string]string, 
 			}
 		case *ast.AssignStmt:
 			for i, lhs := range stmt.Lhs {
+				if idxExpr, ok := lhs.(*ast.IndexExpr); ok && i < len(stmt.Rhs) {
+					if mapIdent, ok := idxExpr.X.(*ast.Ident); ok {
+						if k := stringLitValue(idxExpr.Index); k != "" {
+							localMapMut[mapIdent.Name] = append(localMapMut[mapIdent.Name], mapMutation{
+								key: k,
+								val: stmt.Rhs[i],
+								loc: loc(pf, idxExpr.Index.Pos()),
+							})
+						}
+					}
+					continue
+				}
 				ident, ok := lhs.(*ast.Ident)
 				if !ok || i >= len(stmt.Rhs) {
 					continue
@@ -445,17 +625,119 @@ func inferExprModelType(expr ast.Expr, localTypes map[string]string, c *Catalog)
 	case *ast.UnaryExpr:
 		return inferExprModelType(x.X, localTypes, c)
 	case *ast.CompositeLit:
-		tName := cleanModelType(exprString(x.Type))
+		rawType := exprString(x.Type)
+		tName := cleanModelType(rawType)
 		if c != nil && (c.Models[tName] != nil || c.Structs[tName] != nil) {
+			if strings.HasPrefix(strings.TrimSpace(rawType), "[]") {
+				return "[]" + tName
+			}
 			return tName
+		}
+	case *ast.CallExpr:
+		if c == nil {
+			return ""
+		}
+		switch fn := x.Fun.(type) {
+		case *ast.Ident:
+			if rt := c.FuncReturns[fn.Name]; rt != "" {
+				return rt
+			}
+			cand := strings.TrimPrefix(fn.Name, "New")
+			if c.Models[cand] != nil || c.Structs[cand] != nil {
+				return cand
+			}
+		case *ast.SelectorExpr:
+			if selX, ok := fn.X.(*ast.SelectorExpr); ok && localTypes != nil {
+				if ft := localTypes["field:"+selX.Sel.Name]; ft != "" {
+					if rt := c.FuncReturns[ft+"."+fn.Sel.Name]; rt != "" {
+						return rt
+					}
+				}
+			}
+			if rt := c.FuncReturns[fn.Sel.Name]; rt != "" {
+				return rt
+			}
+			cand := strings.TrimPrefix(fn.Sel.Name, "New")
+			if c.Models[cand] != nil || c.Structs[cand] != nil {
+				return cand
+			}
+		}
+	case *ast.SelectorExpr:
+		baseType := strings.TrimPrefix(inferExprModelType(x.X, localTypes, c), "[]")
+		if baseType != "" && c != nil {
+			if st := c.Structs[baseType]; st != nil {
+				for _, f := range st.Fields {
+					if f.GoName == x.Sel.Name {
+						ft := cleanModelType(f.GoType)
+						if strings.HasPrefix(strings.TrimSpace(f.GoType), "[]") && ft != "" {
+							return "[]" + ft
+						}
+						return ft
+					}
+				}
+			}
 		}
 	}
 	return ""
 }
 
 func recordViewCaller(c *Catalog, rawName string, caller ViewCaller) {
-	if vi := c.LookupView(rawName); vi != nil {
+	if vi := c.lookupViewUnlocked(rawName); vi != nil {
 		vi.Callers = append(vi.Callers, caller)
+	}
+}
+
+func recordViewDataArg(c *Catalog, pf *parsedFile, viewNames []string, dataExpr ast.Expr, ctrlLabel string, localTypes map[string]string, localMaps map[string]*ast.CompositeLit, localMapMut map[string][]mapMutation) {
+	if cl := resolveMapCompositeLit(dataExpr, localMaps); cl != nil {
+		recordViewVarsFromMap(c, pf, viewNames, cl, ctrlLabel, localTypes)
+	}
+	if ident, ok := dataExpr.(*ast.Ident); ok {
+		if muts := localMapMut[ident.Name]; len(muts) > 0 {
+			var allKeys []string
+			for _, vn := range viewNames {
+				allKeys = append(allKeys, normalizeViewKeys(c, vn)...)
+			}
+			for _, mut := range muts {
+				vv := ViewVar{
+					Key:        mut.key,
+					ValueExpr:  exprValueSummary(mut.val),
+					GoType:     inferExprModelType(mut.val, localTypes, c),
+					Controller: ctrlLabel,
+					Loc:        mut.loc,
+				}
+				for _, vk := range allKeys {
+					c.ViewVars[vk] = append(c.ViewVars[vk], vv)
+				}
+			}
+		}
+	}
+	// Support passing a struct or model directly as template context: View().Make("view.tmpl", userStruct)
+	if structType := strings.TrimPrefix(inferExprModelType(dataExpr, localTypes, c), "[]"); structType != "" {
+		if st := c.Structs[structType]; st != nil {
+			var allKeys []string
+			for _, vn := range viewNames {
+				allKeys = append(allKeys, normalizeViewKeys(c, vn)...)
+			}
+			for _, f := range st.Fields {
+				if f.GoName == "" {
+					continue
+				}
+				ft := cleanModelType(f.GoType)
+				if strings.HasPrefix(strings.TrimSpace(f.GoType), "[]") && ft != "" {
+					ft = "[]" + ft
+				}
+				vv := ViewVar{
+					Key:        f.GoName,
+					ValueExpr:  structType + "." + f.GoName,
+					GoType:     ft,
+					Controller: ctrlLabel,
+					Loc:        f.Loc,
+				}
+				for _, vk := range allKeys {
+					c.ViewVars[vk] = append(c.ViewVars[vk], vv)
+				}
+			}
+		}
 	}
 }
 
@@ -487,43 +769,116 @@ func recordViewVarsFromMap(c *Catalog, pf *parsedFile, viewNames []string, cl *a
 }
 
 func propagateTemplateHierarchy(c *Catalog) {
+	// Populate IncludedBy links first
 	for _, parent := range c.ViewItems {
-		if len(parent.Includes) == 0 {
-			continue
-		}
-		parentKeys := normalizeViewKeys(c, parent.Name)
-		if parent.DefineName != "" {
-			parentKeys = append(parentKeys, parent.DefineName)
-		}
-		var parentVars []ViewVar
-		for _, pk := range parentKeys {
-			parentVars = append(parentVars, c.ViewVars[pk]...)
-		}
-		usedSet := map[string]bool{}
-		for _, uv := range parent.UsedVars {
-			usedSet[uv] = true
-		}
-
 		for _, inc := range parent.Includes {
-			child := c.LookupView(inc.Target)
+			child := c.lookupViewUnlocked(inc.Target)
 			if child == nil {
 				continue
 			}
-			if inc.PassDot {
-				// Propagate child's UsedVars up to parent so controller diagnostics know child uses them
-				for _, cuv := range child.UsedVars {
-					if !usedSet[cuv] {
-						usedSet[cuv] = true
-						parent.UsedVars = append(parent.UsedVars, cuv)
+			hasParent := false
+			for _, ib := range child.IncludedBy {
+				if ib == parent.Name {
+					hasParent = true
+					break
+				}
+			}
+			if !hasParent {
+				child.IncludedBy = append(child.IncludedBy, parent.Name)
+			}
+		}
+	}
+
+	// Multi-hop fixed-point propagation (up to 6 hops)
+	for pass := 0; pass < 6; pass++ {
+		changed := false
+		for _, parent := range c.ViewItems {
+			if len(parent.Includes) == 0 {
+				continue
+			}
+			parentKeys := normalizeViewKeys(c, parent.Name)
+			if parent.DefineName != "" {
+				parentKeys = append(parentKeys, parent.DefineName)
+			}
+			var parentVars []ViewVar
+			for _, pk := range parentKeys {
+				parentVars = append(parentVars, c.ViewVars[pk]...)
+			}
+			usedSet := map[string]bool{}
+			for _, uv := range parent.UsedVars {
+				usedSet[uv] = true
+			}
+
+			for _, inc := range parent.Includes {
+				child := c.lookupViewUnlocked(inc.Target)
+				if child == nil {
+					continue
+				}
+				if inc.PassDot {
+					// If ContextExpr is "." or "$", propagate child's UsedVars up to parent
+					if inc.ContextExpr == "" || inc.ContextExpr == "." || inc.ContextExpr == "$" {
+						for _, cuv := range child.UsedVars {
+							if !usedSet[cuv] {
+								usedSet[cuv] = true
+								parent.UsedVars = append(parent.UsedVars, cuv)
+								changed = true
+							}
+						}
+						if child.PassesDot && !parent.PassesDot {
+							parent.PassesDot = true
+							changed = true
+						}
 					}
-				}
-				if child.PassesDot {
-					parent.PassesDot = true
-				}
-				// Propagate parent's ViewVars down to child so child template has completion/hover/definition
-				if len(parentVars) > 0 {
+
 					childKeys := normalizeViewKeys(c, child.Name)
+					existingChildVars := map[string]bool{}
+					for _, ck := range childKeys {
+						for _, cv := range c.ViewVars[ck] {
+							existingChildVars[cv.Key+"|"+cv.Controller] = true
+						}
+					}
+
+					// Sub-field context rebinding: e.g. {{ template "card" .user }}
+					if strings.HasPrefix(inc.ContextExpr, ".") && len(inc.ContextExpr) > 1 {
+						subField := strings.TrimPrefix(strings.TrimPrefix(inc.ContextExpr, "$"), ".")
+						for _, pv := range parentVars {
+							if pv.Key == subField && pv.GoType != "" {
+								st := c.Structs[strings.TrimPrefix(pv.GoType, "[]")]
+								if st != nil {
+									for _, f := range st.Fields {
+										if f.GoName == "" {
+											continue
+										}
+										sig := f.GoName + "|" + pv.Controller
+										if !existingChildVars[sig] {
+											existingChildVars[sig] = true
+											iv := ViewVar{
+												Key:        f.GoName,
+												ValueExpr:  pv.Key + "." + f.GoName,
+												GoType:     cleanModelType(f.GoType),
+												Controller: pv.Controller,
+												Inherited:  parent.Name + " (" + inc.ContextExpr + ")",
+												Loc:        f.Loc,
+											}
+											for _, ck := range childKeys {
+												c.ViewVars[ck] = append(c.ViewVars[ck], iv)
+											}
+											changed = true
+										}
+									}
+								}
+							}
+						}
+						continue
+					}
+
+					// Propagate parent's ViewVars down to child
 					for _, pv := range parentVars {
+						sig := pv.Key + "|" + pv.Controller
+						if existingChildVars[sig] {
+							continue
+						}
+						existingChildVars[sig] = true
 						inheritedVar := pv
 						if inheritedVar.Inherited == "" {
 							inheritedVar.Inherited = parent.Name
@@ -531,9 +886,13 @@ func propagateTemplateHierarchy(c *Catalog) {
 						for _, ck := range childKeys {
 							c.ViewVars[ck] = append(c.ViewVars[ck], inheritedVar)
 						}
+						changed = true
 					}
 				}
 			}
+		}
+		if !changed {
+			break
 		}
 	}
 }
