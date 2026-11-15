@@ -1428,7 +1428,7 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 	}
 
 	// 1. Check if hovering over {{ template "name" }} or {{ define "name" }} or {{ block "name" }}
-	if directive, targetName := templateDirectiveAtOffset(src, off); directive != "" && targetName != "" && cat != nil {
+	if directive, targetName, nStart, nEnd := templateDirectiveSpanAtOffset(src, off); directive != "" && targetName != "" && off <= nEnd+1 && cat != nil {
 		vi := cat.LookupView(targetName)
 		if directive == "define" {
 			if vi == nil {
@@ -1449,14 +1449,21 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 					}
 				}
 			}
-			return &HoverResult{Markdown: b.String()}
+			return &HoverResult{Markdown: b.String(), Start: nStart, End: nEnd}
 		}
 		if vi == nil {
-			return &HoverResult{Markdown: fmt.Sprintf("**Included Template `%s`** *(not found)*", targetName)}
+			return &HoverResult{Markdown: fmt.Sprintf("**Included Template `%s`** *(not found)*", targetName), Start: nStart, End: nEnd}
 		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "**Included Template `%s`** (%s)\n\n", vi.Name, vi.Source)
 		fmt.Fprintf(&b, "- File: `%s` (`%s`)\n", vi.RelDisplay, vi.Loc.File)
+		if len(vi.UsedVars) > 0 {
+			var uvars []string
+			for _, uv := range vi.UsedVars {
+				uvars = append(uvars, "`."+uv+"`")
+			}
+			fmt.Fprintf(&b, "- Uses variables: %s\n", strings.Join(uvars, ", "))
+		}
 		if raw, err := os.ReadFile(vi.Loc.File); err == nil {
 			preview := strings.TrimSpace(string(raw))
 			if len(preview) > 400 {
@@ -1464,7 +1471,7 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 			}
 			fmt.Fprintf(&b, "\n```html\n%s\n```", preview)
 		}
-		return &HoverResult{Markdown: b.String()}
+		return &HoverResult{Markdown: b.String(), Start: nStart, End: nEnd}
 	}
 
 	vars := resolveViewVarsForTemplate(path, cat)
@@ -1472,39 +1479,52 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 	scopedDotType := resolveScopedDotGoType(src, off, vars, locals, cat)
 
 	// 2. Check multi-level struct field hover: .user.Name, .profile.User.Email, or $item.Name
-	if holderChain, field := nestedFieldAtOffset(src, off); holderChain != "" && field != "" && cat != nil {
-		goType := strings.TrimPrefix(resolveExprChainGoType(holderChain, scopedDotType, vars, locals, cat), "[]")
-		if goType != "" {
-			if tbl := cat.Model(goType); tbl != nil {
-				for _, c := range tbl.Columns {
-					if c.GoName == field {
-						return &HoverResult{
-							Markdown: fmt.Sprintf("**`models.%s.%s`** (`%s`)\n\n- Table column: `%s.%s` (`%s`)", goType, c.GoName, c.GoType, tbl.Name, c.Name, c.SQLType),
+	if holderChain, field, fStart, fEnd := nestedFieldSpanAtOffset(src, off); holderChain != "" && field != "" {
+		if cat != nil {
+			goType := strings.TrimPrefix(resolveExprChainGoType(holderChain, scopedDotType, vars, locals, cat), "[]")
+			if goType != "" {
+				if tbl := cat.Model(goType); tbl != nil {
+					for _, c := range tbl.Columns {
+						if c.GoName == field {
+							return &HoverResult{
+								Markdown: fmt.Sprintf("**`models.%s.%s`** (`%s`)\n\n- Table column: `%s.%s` (`%s`)\n- Defined in: `%s:%d`", goType, c.GoName, c.GoType, tbl.Name, c.Name, c.SQLType, filepath.Base(c.Loc.File), c.Loc.Line+1),
+								Start:    fStart,
+								End:      fEnd,
+							}
+						}
+					}
+					for _, r := range tbl.Relations {
+						if r.Name == field {
+							return &HoverResult{
+								Markdown: fmt.Sprintf("**`models.%s.%s`** (relation → `models.%s`)\n\n- Defined in: `%s:%d`", goType, r.Name, r.TargetModel, filepath.Base(r.Loc.File), r.Loc.Line+1),
+								Start:    fStart,
+								End:      fEnd,
+							}
 						}
 					}
 				}
-				for _, r := range tbl.Relations {
-					if r.Name == field {
-						return &HoverResult{
-							Markdown: fmt.Sprintf("**`models.%s.%s`** (relation → `models.%s`)", goType, r.Name, r.TargetModel),
-						}
-					}
-				}
-			}
-			if st := cat.Struct(goType); st != nil {
-				for _, f := range st.Fields {
-					if f.GoName == field {
-						return &HoverResult{
-							Markdown: fmt.Sprintf("**`%s.%s`** (`%s`)", st.Name, f.GoName, f.GoType),
+				if st := cat.Struct(goType); st != nil {
+					for _, f := range st.Fields {
+						if f.GoName == field {
+							return &HoverResult{
+								Markdown: fmt.Sprintf("**`%s.%s`** (`%s`)\n\n- Defined in: `%s:%d`", st.Name, f.GoName, f.GoType, filepath.Base(f.Loc.File), f.Loc.Line+1),
+								Start:    fStart,
+								End:      fEnd,
+							}
 						}
 					}
 				}
 			}
 		}
+		return &HoverResult{
+			Markdown: fmt.Sprintf("**Template Field `%s.%s`**\n\n- Base expression: `%s`\n- Field / key: `.%s`", holderChain, field, holderChain, field),
+			Start:    fStart,
+			End:      fEnd,
+		}
 	}
 
 	// 3. Check local $var hover
-	if lvar := dollarVarAtOffset(src, off); lvar != "" {
+	if lvar, lStart, lEnd := dollarVarSpanAtOffset(src, off); lvar != "" {
 		for _, lv := range locals {
 			if lv.Name == lvar {
 				line, _ := offsetToLineCol(src, lv.Offset)
@@ -1514,26 +1534,111 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 				}
 				return &HoverResult{
 					Markdown: fmt.Sprintf("**Local Template Variable `%s`**%s\n\n- Assigned from: `%s` (line %d)", lv.Name, typeSuffix, lv.Expr, line+1),
+					Start:    lStart,
+					End:      lEnd,
 				}
 			}
 		}
+		return &HoverResult{
+			Markdown: fmt.Sprintf("**Local Template Variable `%s`**", lvar),
+			Start:    lStart,
+			End:      lEnd,
+		}
 	}
 
-	// 4. Context / shared variable or scoped field hover (.varName)
-	word := templateVarAtOffset(src, off)
+	// 4. Context / shared variable or scoped field hover (.varName or $.varName)
+	if dotWord, isRootDollar, dStart, dEnd := dotVarSpanAtOffset(src, off); dotWord != "" {
+		return buildDotVariableHover(path, src, dotWord, isRootDollar, dStart, dEnd, scopedDotType, vars, cat)
+	}
+
+	// 4b. Bare dot (.) context hover (e.g., {{ template "layouts/header.tmpl" . }} or {{ . }})
+	if dotPos, ok := bareDotAtOffset(src, off); ok {
+		return buildBareDotHover(path, src, dotPos, scopedDotType, vars, cat)
+	}
+
+	// 5. Unprefixed identifier: custom template.FuncMap function, keyword, built-in function, or fallback variable check
+	word, wStart, wEnd := templateVarSpanAtOffset(src, off)
 	if word == "" {
 		return nil
 	}
-	if scopedDotType != "" && cat != nil {
-		if ft, _, ok := stepStructOrModelField(scopedDotType, word, cat); ok {
-			return &HoverResult{
-				Markdown: fmt.Sprintf("**Scoped Field `.%s`** (`%s` on `%s`)", word, ft, scopedDotType),
+	if cat != nil {
+		if fn := cat.TemplateFuncs[word]; fn != nil {
+			var b strings.Builder
+			fmt.Fprintf(&b, "**Custom Template Function `%s`**\n\n- Signature: `%s`\n- Defined in: `%s:%d`", fn.Name, fn.Signature, filepath.Base(fn.Loc.File), fn.Loc.Line+1)
+			if fn.Doc != "" {
+				fmt.Fprintf(&b, "\n\n%s", fn.Doc)
 			}
+			return &HoverResult{Markdown: b.String(), Start: wStart, End: wEnd}
 		}
 	}
-	var lines []string
+
+	// 6. Built-in keyword / function hover
+	for _, kw := range tmplKeywords {
+		if kw.Label == word {
+			return &HoverResult{Markdown: fmt.Sprintf("**Go Template Keyword `%s`**\n\n%s", kw.Label, kw.Detail), Start: wStart, End: wEnd}
+		}
+	}
+	for _, fn := range tmplBuiltins {
+		if fn.Label == word {
+			return &HoverResult{Markdown: fmt.Sprintf("**Go Template Function `%s`**\n\n%s", fn.Label, fn.Detail), Start: wStart, End: wEnd}
+		}
+	}
+
+	// Fallback if a template variable is referenced without leading dot or matched in vars
 	for _, vv := range vars {
 		if vv.Key == word {
+			return buildDotVariableHover(path, src, word, false, wStart, wEnd, scopedDotType, vars, cat)
+		}
+	}
+	return nil
+}
+
+func buildDotVariableHover(path, src, word string, isRootDollar bool, start, end int, scopedDotType string, vars []indexer.ViewVar, cat *indexer.Catalog) *HoverResult {
+	prefix := "."
+	if isRootDollar {
+		prefix = "$."
+	}
+
+	// 1. Scoped struct/model field when inside {{ range }} or {{ with }}
+	if !isRootDollar && scopedDotType != "" && cat != nil {
+		if ft, fLoc, ok := stepStructOrModelField(scopedDotType, word, cat); ok {
+			var b strings.Builder
+			fmt.Fprintf(&b, "**Scoped Field `.%s`** (`%s` on `%s`)\n\n", word, ft, scopedDotType)
+			if tbl := cat.Model(strings.TrimPrefix(scopedDotType, "[]")); tbl != nil {
+				for _, c := range tbl.Columns {
+					if c.GoName == word {
+						fmt.Fprintf(&b, "- Table column: `%s.%s` (`%s`)\n", tbl.Name, c.Name, c.SQLType)
+						break
+					}
+				}
+			}
+			if fLoc.Valid() {
+				fmt.Fprintf(&b, "- Defined in: `%s:%d`\n", filepath.Base(fLoc.File), fLoc.Line+1)
+			}
+			return &HoverResult{Markdown: strings.TrimSpace(b.String()), Start: start, End: end}
+		}
+	}
+
+	// 2. Built-in Goravel .csrf_token
+	if word == "csrf_token" {
+		return &HoverResult{
+			Markdown: "**Template Variable `.csrf_token`** (`string`)\n\n- Goravel CSRF token automatically injected by `VerifyCsrfToken` middleware",
+			Start:    start,
+			End:      end,
+		}
+	}
+
+	var passedLines []string
+	var matchedValueExprs []string
+	inferredType := ""
+	for _, vv := range vars {
+		if vv.Key == word {
+			if inferredType == "" && vv.GoType != "" {
+				inferredType = vv.GoType
+			}
+			if vv.ValueExpr != "" {
+				matchedValueExprs = append(matchedValueExprs, vv.ValueExpr)
+			}
 			srcInfo := fmt.Sprintf("`%s`", vv.ValueExpr)
 			if vv.GoType != "" {
 				srcInfo += fmt.Sprintf(" (type `%s`)", vv.GoType)
@@ -1545,36 +1650,380 @@ func TemplateHover(path, src string, cat *indexer.Catalog, off int) *HoverResult
 			} else if vv.Controller != "" {
 				srcInfo += fmt.Sprintf(" in `%s` (`%s:%d`)", vv.Controller, filepath.Base(vv.Loc.File), vv.Loc.Line+1)
 			}
-			lines = append(lines, "- Passed as "+srcInfo)
-		}
-	}
-	if len(lines) > 0 {
-		return &HoverResult{
-			Markdown: fmt.Sprintf("**Template Variable `.%s`**\n\n%s", word, strings.Join(lines, "\n")),
+			passedLines = append(passedLines, "- Passed as "+srcInfo)
 		}
 	}
 
-	// 5. Custom template.FuncMap function hover
+	vi := (*indexer.ViewItem)(nil)
 	if cat != nil {
-		if fn := cat.TemplateFuncs[word]; fn != nil {
-			return &HoverResult{
-				Markdown: fmt.Sprintf("**Custom Template Function `%s`**\n\n- Signature: `%s`\n- Defined in: `%s:%d`", fn.Name, fn.Signature, filepath.Base(fn.Loc.File), fn.Loc.Line+1),
+		vi = cat.ViewForPath(path)
+	}
+	cfgItem := matchConfigForTemplateVar(word, matchedValueExprs, cat)
+	if inferredType == "" && cfgItem != nil {
+		inferredType = "string"
+	}
+	modelName, modelCol := matchModelFieldForTemplateVar(word, vi, cat)
+	if inferredType == "" && modelCol != nil && modelCol.GoType != "" {
+		inferredType = modelCol.GoType
+	}
+
+	var b strings.Builder
+	typeBadge := ""
+	if inferredType != "" {
+		typeBadge = fmt.Sprintf(" (`%s`)", inferredType)
+	}
+	rootBadge := ""
+	if isRootDollar {
+		rootBadge = " *(root context)*"
+	}
+	fmt.Fprintf(&b, "**Template Variable `%s%s`**%s%s\n\n", prefix, word, typeBadge, rootBadge)
+
+	if len(passedLines) > 0 {
+		b.WriteString(strings.Join(passedLines, "\n") + "\n")
+	} else {
+		// Variable is not directly in vars for this template — provide rich contextual intelligence
+		viewDisplay := filepath.Base(path)
+		if vi != nil && vi.Name != "" {
+			viewDisplay = vi.Name
+		}
+		if vi != nil && len(vi.Callers) == 0 && len(vi.IncludedBy) == 0 {
+			fmt.Fprintf(&b, "- **View**: `%s` *(unreferenced view — 0 callers in controllers or routes)*\n", viewDisplay)
+		} else {
+			fmt.Fprintf(&b, "- **Status**: Not passed by callers of `%s`\n", viewDisplay)
+			var candNames []string
+			for _, vv := range vars {
+				candNames = append(candNames, vv.Key)
+			}
+			if best := closestVarMatch(word, candNames); best != "" {
+				fmt.Fprintf(&b, "- **Did you mean**: `.%s` *(passed to this view)*\n", best)
+			}
+		}
+
+		// Check if any included partial (e.g. layouts/header.tmpl) uses this variable or a related variable
+		if vi != nil && cat != nil {
+			for _, inc := range vi.Includes {
+				child := cat.LookupView(inc.Target)
+				if child == nil {
+					continue
+				}
+				for _, uv := range child.UsedVars {
+					if uv == word || isRelatedVarName(word, uv) {
+						fmt.Fprintf(&b, "- **Included Partial**: `%s` uses `.%s`\n", child.Name, uv)
+					}
+				}
+			}
+		}
+
+		// Search across other views in the workspace for exact or related ViewVar definitions
+		if cat != nil {
+			crossKey, crossVars := findCrossViewVars(word, cat)
+			if len(crossVars) > 0 {
+				crossType := ""
+				for _, cv := range crossVars {
+					if cv.GoType != "" {
+						crossType = " · `" + cv.GoType + "`"
+						break
+					}
+				}
+				if crossKey == word {
+					fmt.Fprintf(&b, "- **Passed in Other Views** (`.%s`%s):\n", crossKey, crossType)
+				} else {
+					fmt.Fprintf(&b, "- **Related Variable Across Views** (`.%s`%s):\n", crossKey, crossType)
+				}
+				limit := 4
+				if len(crossVars) < limit {
+					limit = len(crossVars)
+				}
+				for _, cv := range crossVars[:limit] {
+					if cv.ValueExpr != "" {
+						matchedValueExprs = append(matchedValueExprs, cv.ValueExpr)
+					}
+					fmt.Fprintf(&b, "  - `%s` in `%s` (`%s:%d`)\n", cv.ValueExpr, cv.Controller, filepath.Base(cv.Loc.File), cv.Loc.Line+1)
+				}
+				if cfgItem == nil {
+					cfgItem = matchConfigForTemplateVar(word, matchedValueExprs, cat)
+				}
 			}
 		}
 	}
 
-	// 6. Built-in keyword / function hover
-	for _, kw := range tmplKeywords {
-		if kw.Label == word {
-			return &HoverResult{Markdown: fmt.Sprintf("**Go Template Keyword `%s`**\n\n%s", kw.Label, kw.Detail)}
+	// Append linked Goravel Config entry if matched
+	if cfgItem != nil {
+		locInfo := ""
+		if cfgItem.Loc.Valid() {
+			locInfo = fmt.Sprintf(" (`%s:%d`)", filepath.Base(cfgItem.Loc.File), cfgItem.Loc.Line+1)
+		}
+		fmt.Fprintf(&b, "- **Config Key**: `%s`%s\n", cfgItem.Key, locInfo)
+		var meta []string
+		if cfgItem.EnvKey != "" {
+			meta = append(meta, fmt.Sprintf("Env: `%s`", cfgItem.EnvKey))
+		}
+		if cfgItem.Default != "" {
+			meta = append(meta, fmt.Sprintf("Default: `%s`", cfgItem.Default))
+		}
+		if cfgItem.EnvVal != "" {
+			meta = append(meta, fmt.Sprintf("Value: `%s`", cfgItem.EnvVal))
+		}
+		if len(meta) > 0 {
+			fmt.Fprintf(&b, "  - %s\n", strings.Join(meta, " · "))
 		}
 	}
-	for _, fn := range tmplBuiltins {
-		if fn.Label == word {
-			return &HoverResult{Markdown: fmt.Sprintf("**Go Template Function `%s`**\n\n%s", fn.Label, fn.Detail)}
+
+	// Append linked Model field if matched (e.g. .meetingId -> models.Meeting.ID)
+	if modelCol != nil {
+		locInfo := ""
+		if modelCol.Loc.Valid() {
+			locInfo = fmt.Sprintf(" (`%s:%d`)", filepath.Base(modelCol.Loc.File), modelCol.Loc.Line+1)
+		}
+		fmt.Fprintf(&b, "- **Related Model Field**: `models.%s.%s` (`%s`, column `%s`)%s\n", modelName, modelCol.GoName, modelCol.GoType, modelCol.Name, locInfo)
+	}
+
+	// If inferredType is a Model or Struct, list its fields
+	if inferredType != "" && cat != nil {
+		baseType := strings.TrimPrefix(inferredType, "[]")
+		if fItems := structFieldCompletions(baseType, cat); len(fItems) > 0 {
+			var fNames []string
+			limit := 8
+			if len(fItems) < limit {
+				limit = len(fItems)
+			}
+			for _, fi := range fItems[:limit] {
+				fNames = append(fNames, fmt.Sprintf("`.%s.%s`", word, fi.Label))
+			}
+			if len(fItems) > limit {
+				fNames = append(fNames, "...")
+			}
+			fmt.Fprintf(&b, "- **Available Fields**: %s\n", strings.Join(fNames, ", "))
+		}
+	}
+
+	// Show occurrences in current template
+	if spans := findTemplateVarSpansInContent(src, word); len(spans) > 0 {
+		var lineNums []string
+		seenLine := map[int]bool{}
+		for _, sp := range spans {
+			ln, _ := offsetToLineCol(src, sp[0])
+			if !seenLine[ln+1] {
+				seenLine[ln+1] = true
+				lineNums = append(lineNums, strconv.Itoa(ln+1))
+			}
+		}
+		fmt.Fprintf(&b, "- **Occurrences in template**: %d (line %s)\n", len(spans), strings.Join(lineNums, ", "))
+	}
+
+	return &HoverResult{Markdown: strings.TrimSpace(b.String()), Start: start, End: end}
+}
+
+func buildBareDotHover(path, src string, dotPos int, scopedDotType string, vars []indexer.ViewVar, cat *indexer.Catalog) *HoverResult {
+	var b strings.Builder
+	if scopedDotType != "" {
+		fmt.Fprintf(&b, "**Scoped Template Context `.`** (`%s`)\n\n", scopedDotType)
+		if cat != nil {
+			if fItems := structFieldCompletions(strings.TrimPrefix(scopedDotType, "[]"), cat); len(fItems) > 0 {
+				var fNames []string
+				for _, fi := range fItems {
+					fNames = append(fNames, "`."+fi.Label+"`")
+				}
+				fmt.Fprintf(&b, "- Fields: %s\n", strings.Join(fNames, ", "))
+			}
+		}
+		return &HoverResult{Markdown: strings.TrimSpace(b.String()), Start: dotPos, End: dotPos + 1}
+	}
+
+	_, targetName, _, _ := templateDirectiveSpanAtOffset(src, dotPos)
+	if targetName != "" && cat != nil {
+		fmt.Fprintf(&b, "**Template Context `.` passed to `%s`**\n\n", targetName)
+		if child := cat.LookupView(targetName); child != nil && len(child.UsedVars) > 0 {
+			var uvars []string
+			for _, uv := range child.UsedVars {
+				uvars = append(uvars, "`."+uv+"`")
+			}
+			fmt.Fprintf(&b, "- Expected by `%s`: %s\n", child.Name, strings.Join(uvars, ", "))
+		}
+	} else {
+		fmt.Fprintf(&b, "**Root Template Context `.`**\n\n")
+	}
+
+	if len(vars) > 0 {
+		seen := map[string]bool{}
+		var vList []string
+		for _, vv := range vars {
+			if !seen[vv.Key] {
+				seen[vv.Key] = true
+				vList = append(vList, "`."+vv.Key+"`")
+			}
+		}
+		fmt.Fprintf(&b, "- Passed variables: %s\n", strings.Join(vList, ", "))
+	} else if cat != nil {
+		if vi := cat.ViewForPath(path); vi != nil && len(vi.DirectVars) > 0 {
+			var dList []string
+			for _, dv := range vi.DirectVars {
+				dList = append(dList, "`."+dv+"`")
+			}
+			fmt.Fprintf(&b, "- Referenced in `%s`: %s\n", vi.Name, strings.Join(dList, ", "))
+		}
+	}
+	return &HoverResult{Markdown: strings.TrimSpace(b.String()), Start: dotPos, End: dotPos + 1}
+}
+
+var configCallKeyRe = regexp.MustCompile(`Config\(\)\.[A-Za-z]+\("([^"]+)"`)
+
+func matchConfigForTemplateVar(word string, valueExprs []string, cat *indexer.Catalog) *indexer.ConfigItem {
+	if cat == nil || len(cat.Configs) == 0 {
+		return nil
+	}
+	for _, ve := range valueExprs {
+		if m := configCallKeyRe.FindStringSubmatch(ve); m != nil {
+			if ci := cat.Configs[m[1]]; ci != nil {
+				return ci
+			}
+		}
+	}
+	snake := camelToSnake(word)
+	dotCandidate := strings.Replace(snake, "_", ".", 1)
+	if ci := cat.Configs[dotCandidate]; ci != nil {
+		return ci
+	}
+	if snake == "supabase_key" {
+		if ci := cat.Configs["supabase.anon_key"]; ci != nil {
+			return ci
+		}
+	}
+	flatWord := strings.ToLower(strings.ReplaceAll(word, "_", ""))
+	var keys []string
+	for k := range cat.Configs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		normK := strings.ToLower(strings.ReplaceAll(k, ".", "_"))
+		if normK == snake || strings.ReplaceAll(normK, "_", "") == flatWord {
+			return cat.Configs[k]
 		}
 	}
 	return nil
+}
+
+func matchModelFieldForTemplateVar(word string, vi *indexer.ViewItem, cat *indexer.Catalog) (string, *indexer.Column) {
+	if cat == nil || len(cat.Models) == 0 {
+		return "", nil
+	}
+	snake := camelToSnake(word)
+	if strings.HasSuffix(snake, "_id") {
+		prefix := strings.TrimSuffix(snake, "_id")
+		for mName, tbl := range cat.Models {
+			if strings.EqualFold(mName, prefix) || strings.EqualFold(tbl.Name, prefix+"s") || strings.EqualFold(tbl.Name, prefix) {
+				for _, c := range tbl.Columns {
+					if strings.EqualFold(c.Name, "id") || strings.EqualFold(c.Name, snake) {
+						return mName, c
+					}
+				}
+			}
+		}
+	}
+	if vi != nil {
+		parts := strings.Split(vi.Name, "/")
+		if len(parts) > 1 {
+			dirPrefix := strings.TrimSuffix(parts[0], "s")
+			for mName, tbl := range cat.Models {
+				if strings.EqualFold(mName, dirPrefix) || strings.EqualFold(tbl.Name, parts[0]) {
+					for _, c := range tbl.Columns {
+						if strings.EqualFold(c.Name, snake) || strings.EqualFold(c.GoName, word) {
+							return mName, c
+						}
+					}
+				}
+			}
+		}
+	}
+	return "", nil
+}
+
+func findCrossViewVars(word string, cat *indexer.Catalog) (string, []indexer.ViewVar) {
+	if cat == nil || len(cat.ViewVars) == 0 {
+		return "", nil
+	}
+	var viewKeys []string
+	for k := range cat.ViewVars {
+		viewKeys = append(viewKeys, k)
+	}
+	sort.Strings(viewKeys)
+
+	// 1. Exact key match across views
+	seen := map[string]bool{}
+	var exactOut []indexer.ViewVar
+	for _, vk := range viewKeys {
+		for _, vv := range cat.ViewVars[vk] {
+			if vv.Inherited != "" || vv.Key != word {
+				continue
+			}
+			sig := vv.Key + "|" + vv.Controller + "|" + vv.Loc.File + ":" + strconv.Itoa(vv.Loc.Line)
+			if !seen[sig] {
+				seen[sig] = true
+				exactOut = append(exactOut, vv)
+			}
+		}
+	}
+	if len(exactOut) > 0 {
+		return word, exactOut
+	}
+
+	// 2. Related / snake_case / fuzzy match across views
+	matchedKey := ""
+	var relOut []indexer.ViewVar
+	for _, vk := range viewKeys {
+		for _, vv := range cat.ViewVars[vk] {
+			if vv.Inherited != "" {
+				continue
+			}
+			if isRelatedVarName(word, vv.Key) {
+				if matchedKey == "" {
+					matchedKey = vv.Key
+				}
+				if vv.Key != matchedKey {
+					continue
+				}
+				sig := vv.Key + "|" + vv.Controller + "|" + vv.Loc.File + ":" + strconv.Itoa(vv.Loc.Line)
+				if !seen[sig] {
+					seen[sig] = true
+					relOut = append(relOut, vv)
+				}
+			}
+		}
+	}
+	return matchedKey, relOut
+}
+
+func isRelatedVarName(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	sa := camelToSnake(a)
+	sb := camelToSnake(b)
+	if sa == sb || strings.ReplaceAll(sa, "_", "") == strings.ReplaceAll(sb, "_", "") {
+		return true
+	}
+	ta := strings.Split(sa, "_")
+	tb := strings.Split(sb, "_")
+	if len(ta) >= 2 && len(tb) >= 2 && ta[0] == tb[0] && ta[len(ta)-1] == tb[len(tb)-1] {
+		return true
+	}
+	return levenshtein(sa, sb) <= 2
+}
+
+func camelToSnake(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 && s[i-1] != '_' && !(s[i-1] >= 'A' && s[i-1] <= 'Z') {
+				b.WriteByte('_')
+			}
+			b.WriteRune(r + ('a' - 'A'))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return strings.ToLower(b.String())
 }
 
 // TemplateDefinition jumps from .varName, .a.b.c, $local, custom FuncMap function, {{ template "name" }}, or HTML route/asset in a template file to its definition.
@@ -1587,7 +2036,7 @@ func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []index
 	}
 
 	// 1. Jump from {{ template "name" }} or {{ block "name" }} to target template file (or from {{ define "name" }} to Go callers)
-	if directive, targetName := templateDirectiveAtOffset(src, off); directive != "" && targetName != "" && cat != nil {
+	if directive, targetName, _, nEnd := templateDirectiveSpanAtOffset(src, off); directive != "" && targetName != "" && off <= nEnd+1 && cat != nil {
 		var locs []indexer.Location
 		if directive == "define" {
 			if vi := cat.LookupView(targetName); vi != nil {
@@ -1645,8 +2094,11 @@ func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []index
 		}
 	}
 
-	// 4. Jump from .varName (or scoped field) or custom FuncMap function
-	word := templateVarAtOffset(src, off)
+	// 4. Jump from .varName (or scoped field, config entry, related cross-view var, model field) or custom FuncMap function
+	word, _, _, _ := dotVarSpanAtOffset(src, off)
+	if word == "" {
+		word = templateVarAtOffset(src, off)
+	}
 	if word == "" {
 		return nil
 	}
@@ -1656,9 +2108,15 @@ func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []index
 		}
 	}
 	var locs []indexer.Location
+	var matchedValueExprs []string
 	for _, vv := range vars {
-		if vv.Key == word && vv.Loc.Valid() {
-			locs = append(locs, vv.Loc)
+		if vv.Key == word {
+			if vv.ValueExpr != "" {
+				matchedValueExprs = append(matchedValueExprs, vv.ValueExpr)
+			}
+			if vv.Loc.Valid() {
+				locs = append(locs, vv.Loc)
+			}
 		}
 	}
 	if len(locs) > 0 {
@@ -1668,8 +2126,24 @@ func TemplateDefinition(path, src string, cat *indexer.Catalog, off int) []index
 		if fn := cat.TemplateFuncs[word]; fn != nil && fn.Loc.Valid() {
 			return []indexer.Location{fn.Loc}
 		}
+		if _, crossVars := findCrossViewVars(word, cat); len(crossVars) > 0 {
+			for _, cv := range crossVars {
+				if cv.ValueExpr != "" {
+					matchedValueExprs = append(matchedValueExprs, cv.ValueExpr)
+				}
+				if cv.Loc.Valid() {
+					locs = append(locs, cv.Loc)
+				}
+			}
+		}
+		if cfgItem := matchConfigForTemplateVar(word, matchedValueExprs, cat); cfgItem != nil && cfgItem.Loc.Valid() {
+			locs = append(locs, cfgItem.Loc)
+		}
+		if _, col := matchModelFieldForTemplateVar(word, cat.ViewForPath(path), cat); col != nil && col.Loc.Valid() {
+			locs = append(locs, col.Loc)
+		}
 	}
-	return nil
+	return locs
 }
 
 var (
@@ -2602,8 +3076,16 @@ func templateDirectiveSpanAtOffset(src string, off int) (directive, target strin
 }
 
 func nestedFieldAtOffset(src string, off int) (holder, field string) {
+	h, f, _, _ := nestedFieldSpanAtOffset(src, off)
+	return h, f
+}
+
+func nestedFieldSpanAtOffset(src string, off int) (holder, field string, start, end int) {
 	if off < 0 || off > len(src) {
-		return "", ""
+		return "", "", 0, 0
+	}
+	if off < len(src) && src[off] == '.' && off+1 < len(src) && isIdentChar(src[off+1]) {
+		off++
 	}
 	l, r := off, off
 	for l > 0 && isIdentChar(src[l-1]) {
@@ -2613,7 +3095,7 @@ func nestedFieldAtOffset(src string, off int) (holder, field string) {
 		r++
 	}
 	if l == r || l == 0 || src[l-1] != '.' {
-		return "", ""
+		return "", "", 0, 0
 	}
 	field = src[l:r]
 	hlEnd := l - 1
@@ -2623,14 +3105,22 @@ func nestedFieldAtOffset(src string, off int) (holder, field string) {
 	}
 	holder = strings.TrimSpace(src[hlStart:hlEnd])
 	if holder == "" || holder == "$" || holder == "." {
-		return "", ""
+		return "", "", 0, 0
 	}
-	return holder, field
+	return holder, field, l, r
 }
 
 func dollarVarAtOffset(src string, off int) string {
+	v, _, _ := dollarVarSpanAtOffset(src, off)
+	return v
+}
+
+func dollarVarSpanAtOffset(src string, off int) (string, int, int) {
 	if off < 0 || off > len(src) {
-		return ""
+		return "", 0, 0
+	}
+	if off < len(src) && src[off] == '$' && off+1 < len(src) && isIdentChar(src[off+1]) {
+		off++
 	}
 	l, r := off, off
 	for l > 0 && isIdentChar(src[l-1]) {
@@ -2640,12 +3130,65 @@ func dollarVarAtOffset(src string, off int) string {
 		r++
 	}
 	if l > 0 && src[l-1] == '$' && l < r {
-		return "$" + src[l:r]
+		return "$" + src[l:r], l - 1, r
 	}
-	if l < len(src) && src[l] == '$' && r > l+1 {
-		return src[l:r]
+	return "", 0, 0
+}
+
+func dotVarSpanAtOffset(src string, off int) (name string, isRootDollar bool, start, end int) {
+	if off < 0 || off > len(src) {
+		return "", false, 0, 0
 	}
-	return ""
+	// If cursor is on '$' of '$.ident', advance to ident
+	if off+2 < len(src) && src[off] == '$' && src[off+1] == '.' && isIdentChar(src[off+2]) {
+		off += 2
+	} else if off+1 < len(src) && src[off] == '.' && isIdentChar(src[off+1]) {
+		// If cursor is on '.' of '.ident' or '$.ident', advance to ident
+		off++
+	}
+	l, r := off, off
+	for l > 0 && isIdentChar(src[l-1]) {
+		l--
+	}
+	for r < len(src) && isIdentChar(src[r]) {
+		r++
+	}
+	if l == r || l == 0 || src[l-1] != '.' {
+		return "", false, 0, 0
+	}
+	// Make sure this is a root/scoped '.ident' or '$.ident', not a chained '.a.b'
+	if l >= 2 && isIdentChar(src[l-2]) {
+		return "", false, 0, 0
+	}
+	if l >= 2 && src[l-2] == '$' {
+		return src[l:r], true, l - 2, r
+	}
+	return src[l:r], false, l - 1, r
+}
+
+func bareDotAtOffset(src string, off int) (int, bool) {
+	if off < 0 || off > len(src) {
+		return 0, false
+	}
+	check := func(idx int) bool {
+		if idx < 0 || idx >= len(src) || src[idx] != '.' {
+			return false
+		}
+		if idx > 0 && (isIdentChar(src[idx-1]) || src[idx-1] == '.' || src[idx-1] == '$') {
+			return false
+		}
+		if idx+1 < len(src) && (isIdentChar(src[idx+1]) || src[idx+1] == '.') {
+			return false
+		}
+		return true
+	}
+	if check(off) {
+		return off, true
+	}
+	if check(off - 1) {
+		return off - 1, true
+	}
+	return 0, false
 }
 
 func templateVarAtOffset(src string, off int) string {
@@ -2656,6 +3199,9 @@ func templateVarAtOffset(src string, off int) string {
 func templateVarSpanAtOffset(src string, off int) (string, int, int) {
 	if off < 0 || off > len(src) {
 		return "", 0, 0
+	}
+	if off+1 < len(src) && src[off] == '.' && isIdentChar(src[off+1]) {
+		off++
 	}
 	l, r := off, off
 	for l > 0 && isIdentChar(src[l-1]) {

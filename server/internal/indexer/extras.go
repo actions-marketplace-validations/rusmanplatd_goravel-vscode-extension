@@ -616,7 +616,21 @@ func inferExprModelType(expr ast.Expr, localTypes map[string]string, c *Catalog)
 		return ""
 	}
 	switch x := expr.(type) {
+	case *ast.BasicLit:
+		switch x.Kind {
+		case token.STRING:
+			return "string"
+		case token.INT:
+			return "int"
+		case token.FLOAT:
+			return "float64"
+		case token.CHAR:
+			return "rune"
+		}
 	case *ast.Ident:
+		if x.Name == "true" || x.Name == "false" {
+			return "bool"
+		}
 		if localTypes != nil {
 			if t := localTypes[x.Name]; t != "" {
 				return t
@@ -634,35 +648,56 @@ func inferExprModelType(expr ast.Expr, localTypes map[string]string, c *Catalog)
 			return tName
 		}
 	case *ast.CallExpr:
-		if c == nil {
-			return ""
-		}
 		switch fn := x.Fun.(type) {
 		case *ast.Ident:
-			if rt := c.FuncReturns[fn.Name]; rt != "" {
-				return rt
-			}
-			cand := strings.TrimPrefix(fn.Name, "New")
-			if c.Models[cand] != nil || c.Structs[cand] != nil {
-				return cand
-			}
-		case *ast.SelectorExpr:
-			if selX, ok := fn.X.(*ast.SelectorExpr); ok && localTypes != nil {
-				if ft := localTypes["field:"+selX.Sel.Name]; ft != "" {
-					if rt := c.FuncReturns[ft+"."+fn.Sel.Name]; rt != "" {
-						return rt
-					}
+			if c != nil {
+				if rt := c.FuncReturns[fn.Name]; rt != "" {
+					return rt
+				}
+				cand := strings.TrimPrefix(fn.Name, "New")
+				if c.Models[cand] != nil || c.Structs[cand] != nil {
+					return cand
 				}
 			}
-			if rt := c.FuncReturns[fn.Sel.Name]; rt != "" {
-				return rt
+		case *ast.SelectorExpr:
+			switch fn.Sel.Name {
+			case "GetString", "Input", "Query", "Route", "Header", "Cookie", "FullUrl", "Url", "Path", "Method", "Ip", "Origin", "Host":
+				return "string"
+			case "GetInt", "RouteInt", "InputInt", "QueryInt":
+				return "int"
+			case "GetBool", "InputBool", "QueryBool":
+				return "bool"
+			case "GetDuration":
+				return "time.Duration"
+			case "Env":
+				if len(x.Args) >= 2 {
+					if t := inferExprModelType(x.Args[1], localTypes, c); t != "" {
+						return t
+					}
+				}
+				return "string"
 			}
-			cand := strings.TrimPrefix(fn.Sel.Name, "New")
-			if c.Models[cand] != nil || c.Structs[cand] != nil {
-				return cand
+			if c != nil {
+				if selX, ok := fn.X.(*ast.SelectorExpr); ok && localTypes != nil {
+					if ft := localTypes["field:"+selX.Sel.Name]; ft != "" {
+						if rt := c.FuncReturns[ft+"."+fn.Sel.Name]; rt != "" {
+							return rt
+						}
+					}
+				}
+				if rt := c.FuncReturns[fn.Sel.Name]; rt != "" {
+					return rt
+				}
+				cand := strings.TrimPrefix(fn.Sel.Name, "New")
+				if c.Models[cand] != nil || c.Structs[cand] != nil {
+					return cand
+				}
 			}
 		}
 	case *ast.SelectorExpr:
+		if id, ok := x.X.(*ast.Ident); ok && id.Name == "support" && x.Sel.Name == "Version" {
+			return "string"
+		}
 		baseType := strings.TrimPrefix(inferExprModelType(x.X, localTypes, c), "[]")
 		if baseType != "" && c != nil {
 			if st := c.Structs[baseType]; st != nil {
@@ -945,6 +980,18 @@ func exprValueSummary(e ast.Expr) string {
 	case *ast.SelectorExpr:
 		return exprString(x.X) + "." + x.Sel.Name
 	case *ast.CallExpr:
+		var args []string
+		for _, a := range x.Args {
+			as := exprValueSummary(a)
+			if len(as) > 36 {
+				as = "..."
+			}
+			args = append(args, as)
+		}
+		callStr := exprString(x.Fun) + "(" + strings.Join(args, ", ") + ")"
+		if len(callStr) <= 80 {
+			return callStr
+		}
 		return exprString(x.Fun) + "(...)"
 	case *ast.CompositeLit:
 		return exprString(x.Type) + "{...}"

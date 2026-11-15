@@ -995,4 +995,30 @@ func (c *ProfileController) Show(ctx http.Context) http.Response {
 	if len(syms) < 3 {
 		t.Errorf("expected document symbols for define, template, and with in signin.tmpl, got %+v", syms)
 	}
+
+	// Verify TemplateHover on unreferenced view variables ({{.supabaseUrl}}, {{.supabaseAnonKey}}) and leading dot
+	chatSrc := `{{ define "chat/index.tmpl" }}
+{{template "layouts/header.tmpl" .}}
+<meta name="supabase-url" content="{{.supabaseUrl}}">
+<meta name="supabase-key" content="{{.supabaseAnonKey}}">
+{{ end }}`
+	chatPath := writeTempFile(t, root, "resources/views/chat/index.tmpl", chatSrc)
+	cat = indexer.Build(root)
+
+	supaIdx := strings.Index(chatSrc, "supabaseUrl")
+	hovSupa := framework.TemplateHover(chatPath, chatSrc, cat, supaIdx)
+	if hovSupa == nil || !strings.Contains(hovSupa.Markdown, "Template Variable `.supabaseUrl`") || !strings.Contains(hovSupa.Markdown, "supabase_url") {
+		t.Errorf("expected rich TemplateHover for .supabaseUrl on unreferenced view, got %+v", hovSupa)
+	}
+	// Hovering directly on the leading '.' of {{.supabaseUrl}} should also work
+	hovDotPrefix := framework.TemplateHover(chatPath, chatSrc, cat, supaIdx-1)
+	if hovDotPrefix == nil || !strings.Contains(hovDotPrefix.Markdown, "Template Variable `.supabaseUrl`") {
+		t.Errorf("expected TemplateHover on leading '.' of .supabaseUrl, got %+v", hovDotPrefix)
+	}
+	// Hovering on bare '.' in {{template "layouts/header.tmpl" .}}
+	bareDotIdx := strings.Index(chatSrc, ".}}")
+	hovBareDot := framework.TemplateHover(chatPath, chatSrc, cat, bareDotIdx)
+	if hovBareDot == nil || !strings.Contains(hovBareDot.Markdown, "Template Context `.`") {
+		t.Errorf("expected TemplateHover on bare '.', got %+v", hovBareDot)
+	}
 }

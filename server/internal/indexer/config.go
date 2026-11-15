@@ -19,6 +19,17 @@ func indexConfigs(c *Catalog, root string) {
 	// 2. Parse config/*.go files
 	files := walkGoFiles(filepath.Join(root, "config"))
 	for _, pf := range files {
+		localExprs := map[string]ast.Expr{}
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			if as, ok := n.(*ast.AssignStmt); ok {
+				for i, lhs := range as.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && i < len(as.Rhs) {
+						localExprs[id.Name] = as.Rhs[i]
+					}
+				}
+			}
+			return true
+		})
 		ast.Inspect(pf.file, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok || len(call.Args) < 2 {
@@ -37,14 +48,14 @@ func indexConfigs(c *Catalog, root string) {
 				return true
 			}
 			if cl, ok := call.Args[1].(*ast.CompositeLit); ok {
-				walkConfigMap(c, pf, ns, cl)
+				walkConfigMap(c, pf, ns, cl, localExprs)
 			}
 			return false
 		})
 	}
 }
 
-func walkConfigMap(c *Catalog, pf *parsedFile, prefix string, cl *ast.CompositeLit) {
+func walkConfigMap(c *Catalog, pf *parsedFile, prefix string, cl *ast.CompositeLit, localExprs map[string]ast.Expr) {
 	for _, elt := range cl.Elts {
 		kv, ok := elt.(*ast.KeyValueExpr)
 		if !ok {
@@ -60,10 +71,16 @@ func walkConfigMap(c *Catalog, pf *parsedFile, prefix string, cl *ast.CompositeL
 		}
 		fullKey := prefix + "." + k
 		if subMap, ok := kv.Value.(*ast.CompositeLit); ok && isMapLit(subMap) {
-			walkConfigMap(c, pf, fullKey, subMap)
+			walkConfigMap(c, pf, fullKey, subMap, localExprs)
 			continue
 		}
-		envKey, defVal := extractConfigValue(kv.Value)
+		valExpr := kv.Value
+		if id, ok := valExpr.(*ast.Ident); ok && localExprs != nil {
+			if resolved := localExprs[id.Name]; resolved != nil {
+				valExpr = resolved
+			}
+		}
+		envKey, defVal := extractConfigValue(valExpr)
 		c.Configs[fullKey] = &ConfigItem{
 			Key:     fullKey,
 			EnvKey:  envKey,

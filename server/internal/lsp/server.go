@@ -600,7 +600,11 @@ func (s *Server) hover(raw json.RawMessage) any {
 	}
 	if framework.IsTemplateFile(path) {
 		if h := framework.TemplateHover(path, text, s.cat, off); h != nil {
-			return map[string]any{"contents": map[string]any{"kind": "markdown", "value": h.Markdown}}
+			res := map[string]any{"contents": map[string]any{"kind": "markdown", "value": h.Markdown}}
+			if h.End > h.Start {
+				res["range"] = Range{offsetToPos(text, h.Start), offsetToPos(text, h.End)}
+			}
+			return res
 		}
 		return nil
 	}

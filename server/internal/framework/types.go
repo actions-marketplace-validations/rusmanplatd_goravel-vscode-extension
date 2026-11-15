@@ -40,9 +40,11 @@ type InlayHint struct {
 	Label  string
 }
 
-// HoverResult represents markdown hover text.
+// HoverResult represents markdown hover text and optional byte range.
 type HoverResult struct {
 	Markdown string
+	Start    int
+	End      int
 }
 
 // DefResult represents a jump-to-definition target.
