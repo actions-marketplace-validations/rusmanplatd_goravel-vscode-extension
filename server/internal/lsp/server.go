@@ -55,17 +55,25 @@ type LocationT struct {
 
 // Server is the language server state.
 type Server struct {
-	in   *bufio.Reader
-	out  io.Writer
-	wmu  sync.Mutex
-	root string
-	cat  *indexer.Catalog
-	docs map[string]string // uri -> text
-	exit bool
+	in    *bufio.Reader
+	out   io.Writer
+	wmu   sync.Mutex
+	root  string
+	roots []string
+	cat   *indexer.Catalog
+	cats  map[string]*indexer.Catalog
+	docs  map[string]string // uri -> text
+	exit  bool
 }
 
 func New(r io.Reader, w io.Writer) *Server {
-	return &Server{in: bufio.NewReader(r), out: w, cat: indexer.NewCatalog(), docs: map[string]string{}}
+	return &Server{
+		in:   bufio.NewReader(r),
+		out:  w,
+		cat:  indexer.NewCatalog(),
+		cats: map[string]*indexer.Catalog{},
+		docs: map[string]string{},
+	}
 }
 
 func (s *Server) Run() error {
@@ -144,11 +152,15 @@ func (s *Server) dispatch(m *message) {
 		if p.InitOpts.LiveIntrospection {
 			indexer.LiveDBEnabled = true
 		}
-		uri := p.RootURI
-		if uri == "" && len(p.Folders) > 0 {
-			uri = p.Folders[0].URI
+		for _, f := range p.Folders {
+			s.addRoot(uriToPath(f.URI))
 		}
-		s.root = uriToPath(uri)
+		if p.RootURI != "" {
+			s.addRoot(uriToPath(p.RootURI))
+		}
+		if len(s.roots) > 0 {
+			s.root = s.roots[0]
+		}
 		s.reindex()
 		s.reply(m.ID, map[string]any{
 			"capabilities": map[string]any{
@@ -209,7 +221,7 @@ func (s *Server) dispatch(m *message) {
 		_ = json.Unmarshal(m.Params, &p)
 		path := filepath.ToSlash(uriToPath(p.TextDocument.URI))
 		if shouldReindex(path) {
-			s.reindex()
+			s.reindexPath(uriToPath(p.TextDocument.URI))
 			for uri := range s.docs {
 				s.diagnose(uri)
 			}
@@ -309,9 +321,76 @@ func shouldReindex(path string) bool {
 		strings.HasSuffix(path, "/.env.example")
 }
 
+func (s *Server) addRoot(r string) {
+	if r == "" {
+		return
+	}
+	r = filepath.Clean(r)
+	if r == "." {
+		return
+	}
+	for _, existing := range s.roots {
+		if existing == r {
+			return
+		}
+	}
+	s.roots = append(s.roots, r)
+}
+
+func (s *Server) rootForPath(path string) string {
+	clean := filepath.Clean(path)
+	best := ""
+	for _, r := range s.roots {
+		if clean == r || strings.HasPrefix(clean, r+string(filepath.Separator)) {
+			if len(r) > len(best) {
+				best = r
+			}
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return s.root
+}
+
+func (s *Server) catalogForPath(path string) *indexer.Catalog {
+	if r := s.rootForPath(path); r != "" {
+		if c := s.cats[r]; c != nil {
+			return c
+		}
+	}
+	return s.cat
+}
+
 func (s *Server) reindex() {
-	if s.root != "" {
-		s.cat = indexer.Build(s.root)
+	if len(s.roots) == 0 && s.root != "" {
+		s.addRoot(s.root)
+	}
+	if s.cats == nil {
+		s.cats = map[string]*indexer.Catalog{}
+	}
+	for _, r := range s.roots {
+		c := indexer.Build(r)
+		s.cats[r] = c
+		if r == s.root || s.cat == nil {
+			s.cat = c
+		}
+	}
+}
+
+func (s *Server) reindexPath(path string) {
+	r := s.rootForPath(path)
+	if r == "" {
+		s.reindex()
+		return
+	}
+	if s.cats == nil {
+		s.cats = map[string]*indexer.Catalog{}
+	}
+	c := indexer.Build(r)
+	s.cats[r] = c
+	if r == s.root || s.cat == nil {
+		s.cat = c
 	}
 }
 
@@ -342,7 +421,8 @@ func (s *Server) resolve(raw json.RawMessage) (text string, p posParams, off int
 		ok = false
 		return
 	}
-	fi = rawsql.Extract(path, []byte(text), s.cat)
+	cat := s.catalogForPath(path)
+	fi = rawsql.Extract(path, []byte(text), cat)
 	d = fi.DocAt(off)
 	if d == nil {
 		ok = false
@@ -354,7 +434,7 @@ func (s *Server) resolve(raw json.RawMessage) (text string, p posParams, off int
 		ok = false
 		return
 	}
-	sc = fi.BuildScope(d, s.cat)
+	sc = fi.BuildScope(d, cat)
 	ok = true
 	return
 }
@@ -364,8 +444,9 @@ func (s *Server) completion(raw json.RawMessage) any {
 	if !inputOK {
 		return nil
 	}
+	cat := s.catalogForPath(path)
 	if framework.IsTemplateFile(path) {
-		if tItems := framework.TemplateCompletions(path, text, s.cat, off); len(tItems) > 0 {
+		if tItems := framework.TemplateCompletions(path, text, cat, off); len(tItems) > 0 {
 			var lspItems []map[string]any
 			for _, it := range tItems {
 				m := map[string]any{"label": it.Label, "detail": it.Detail, "kind": it.Kind}
@@ -379,13 +460,13 @@ func (s *Server) completion(raw json.RawMessage) any {
 		return nil
 	}
 	// 1. Check ORM / Config / Validation spans first
-	fa := orm.AnalyzeFile(path, []byte(text), s.cat)
-	if items, ok := fa.Completion(off, s.cat); ok && len(items) > 0 {
+	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	if items, ok := fa.Completion(off, cat); ok && len(items) > 0 {
 		return map[string]any{"isIncomplete": false, "items": items}
 	}
 
 	// 1b. Check Form Request keys & View templates
-	if fItems := append(framework.RequestCompletions(path, text, s.cat, off), framework.ViewCompletions(path, text, s.cat, off)...); len(fItems) > 0 {
+	if fItems := append(framework.RequestCompletions(path, text, cat, off), framework.ViewCompletions(path, text, cat, off)...); len(fItems) > 0 {
 		var lspItems []map[string]any
 		for _, it := range fItems {
 			m := map[string]any{"label": it.Label, "detail": it.Detail, "kind": it.Kind}
@@ -598,8 +679,9 @@ func (s *Server) hover(raw json.RawMessage) any {
 	if !inputOK {
 		return nil
 	}
+	cat := s.catalogForPath(path)
 	if framework.IsTemplateFile(path) {
-		if h := framework.TemplateHover(path, text, s.cat, off); h != nil {
+		if h := framework.TemplateHover(path, text, cat, off); h != nil {
 			res := map[string]any{"contents": map[string]any{"kind": "markdown", "value": h.Markdown}}
 			if h.End > h.Start {
 				res["range"] = Range{offsetToPos(text, h.Start), offsetToPos(text, h.End)}
@@ -609,8 +691,8 @@ func (s *Server) hover(raw json.RawMessage) any {
 		return nil
 	}
 	// 1. Check ORM / Config / Validation spans first
-	fa := orm.AnalyzeFile(path, []byte(text), s.cat)
-	if md, st, en, ok := fa.Hover(off, s.cat); ok {
+	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	if md, st, en, ok := fa.Hover(off, cat); ok {
 		return map[string]any{
 			"contents": map[string]any{"kind": "markdown", "value": md},
 			"range":    Range{offsetToPos(text, st), offsetToPos(text, en)},
@@ -618,10 +700,10 @@ func (s *Server) hover(raw json.RawMessage) any {
 	}
 
 	// 1b. Framework hover (Routes/Controllers/Middleware, Views, Schedule Cron)
-	if h := framework.RouteAndControllerHover(path, text, s.cat, off); h != nil {
+	if h := framework.RouteAndControllerHover(path, text, cat, off); h != nil {
 		return map[string]any{"contents": map[string]any{"kind": "markdown", "value": h.Markdown}}
 	}
-	if h := framework.ViewHover(path, text, s.cat, off); h != nil {
+	if h := framework.ViewHover(path, text, cat, off); h != nil {
 		return map[string]any{"contents": map[string]any{"kind": "markdown", "value": h.Markdown}}
 	}
 	if h := framework.ScheduleHover(path, text, off); h != nil {
@@ -630,13 +712,13 @@ func (s *Server) hover(raw json.RawMessage) any {
 
 	// 1c. OriginalTableName constant symbol hover
 	if word, st, en := identAtOffset(text, off); word != "" {
-		if tc := s.cat.TableConsts[word]; tc != nil {
+		if tc := cat.TableConsts[word]; tc != nil {
 			var b strings.Builder
 			fmt.Fprintf(&b, "**`%s`** = `\"%s\"`\n\n", tc.Name, tc.TableName)
 			if tc.Model != "" {
 				fmt.Fprintf(&b, "- Model: `models.%s`\n", tc.Model)
 			}
-			if t := s.cat.Table(tc.TableName); t != nil {
+			if t := cat.Table(tc.TableName); t != nil {
 				fmt.Fprintf(&b, "- Columns: %d\n", len(t.Columns))
 			}
 			return map[string]any{
@@ -651,7 +733,7 @@ func (s *Server) hover(raw json.RawMessage) any {
 	if !ok {
 		if fi != nil {
 			if vr := fi.VarRefAt(off); vr != nil {
-				if t := s.cat.Table(vr.Table); t != nil {
+				if t := cat.Table(vr.Table); t != nil {
 					return map[string]any{
 						"contents": map[string]any{"kind": "markdown", "value": tableMD(t)},
 						"range":    Range{offsetToPos(text, vr.GoStart), offsetToPos(text, vr.GoEnd)},
@@ -695,6 +777,7 @@ func (s *Server) definition(raw json.RawMessage) any {
 	if !inputOK {
 		return nil
 	}
+	cat := s.catalogForPath(path)
 	var locs []LocationT
 	add := func(l indexer.Location, n int) {
 		if l.Valid() {
@@ -702,7 +785,7 @@ func (s *Server) definition(raw json.RawMessage) any {
 		}
 	}
 	if framework.IsTemplateFile(path) {
-		for _, l := range framework.TemplateDefinition(path, text, s.cat, off) {
+		for _, l := range framework.TemplateDefinition(path, text, cat, off) {
 			add(l, 0)
 		}
 		if len(locs) > 0 {
@@ -712,22 +795,22 @@ func (s *Server) definition(raw json.RawMessage) any {
 	}
 
 	// 1. Check ORM / Config / Validation spans first
-	fa := orm.AnalyzeFile(path, []byte(text), s.cat)
-	for _, l := range fa.Definition(off, s.cat) {
+	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	for _, l := range fa.Definition(off, cat) {
 		add(l, 0)
 	}
-	for _, l := range framework.ViewLocations(path, text, s.cat, off) {
+	for _, l := range framework.ViewLocations(path, text, cat, off) {
 		add(l, 0)
 	}
-	if d := framework.RouteMiddlewareDefinition(path, text, s.cat, off); d != nil {
+	if d := framework.RouteMiddlewareDefinition(path, text, cat, off); d != nil {
 		add(d.Loc, 0)
 	}
 	if word, _, _ := identAtOffset(text, off); word != "" {
-		if tc := s.cat.TableConsts[word]; tc != nil {
+		if tc := cat.TableConsts[word]; tc != nil {
 			pos := offsetToPos(text, off)
 			if tc.Loc.Valid() && !(filepath.Clean(tc.Loc.File) == filepath.Clean(path) && tc.Loc.Line == pos.Line) {
 				add(tc.Loc, len(tc.Name))
-			} else if t := s.cat.Table(tc.TableName); t != nil {
+			} else if t := cat.Table(tc.TableName); t != nil {
 				add(t.Loc, len(t.Model))
 				add(t.MigLoc, 0)
 			}
@@ -742,7 +825,7 @@ func (s *Server) definition(raw json.RawMessage) any {
 	if !ok {
 		if fi != nil {
 			if vr := fi.VarRefAt(off); vr != nil {
-				if t := s.cat.Table(vr.Table); t != nil {
+				if t := cat.Table(vr.Table); t != nil {
 					add(t.Loc, len(t.Model))
 					add(t.MigLoc, 0)
 					if len(locs) > 0 {
@@ -787,36 +870,37 @@ func (s *Server) definition(raw json.RawMessage) any {
 
 func (s *Server) diagnose(uri string) {
 	text := s.docs[uri]
+	path := uriToPath(uri)
+	cat := s.catalogForPath(path)
 	diags := []map[string]any{}
 	if strings.HasSuffix(uri, ".go") {
-		path := uriToPath(uri)
-		fi := rawsql.Extract(path, []byte(text), s.cat)
-		for _, d := range rawsql.Analyze(fi, s.cat) {
+		fi := rawsql.Extract(path, []byte(text), cat)
+		for _, d := range rawsql.Analyze(fi, cat) {
 			diags = append(diags, map[string]any{
 				"range":    Range{offsetToPos(text, d.Start), offsetToPos(text, d.End)},
 				"severity": d.Severity, "source": "goravel-sql", "message": d.Message,
 			})
 		}
-		fa := orm.AnalyzeFile(path, []byte(text), s.cat)
-		for _, d := range fa.Diagnostics(s.cat) {
+		fa := orm.AnalyzeFile(path, []byte(text), cat)
+		for _, d := range fa.Diagnostics(cat) {
 			diags = append(diags, map[string]any{
 				"range":    Range{offsetToPos(text, d.Start), offsetToPos(text, d.End)},
 				"severity": d.Severity, "source": "goravel", "message": d.Message,
 			})
 		}
 		var fDiags []framework.Diag
-		fDiags = append(fDiags, framework.RequestDiagnostics(path, text, s.cat)...)
-		fDiags = append(fDiags, framework.ControllerDiagnostics(path, text, s.cat)...)
-		fDiags = append(fDiags, framework.ViewDiagnostics(path, text, s.cat)...)
-		fDiags = append(fDiags, framework.DriftDiagnostics(path, text, s.cat)...)
+		fDiags = append(fDiags, framework.RequestDiagnostics(path, text, cat)...)
+		fDiags = append(fDiags, framework.ControllerDiagnostics(path, text, cat)...)
+		fDiags = append(fDiags, framework.ViewDiagnostics(path, text, cat)...)
+		fDiags = append(fDiags, framework.DriftDiagnostics(path, text, cat)...)
 		for _, d := range fDiags {
 			diags = append(diags, map[string]any{
 				"range":    Range{offsetToPos(text, d.Start), offsetToPos(text, d.End)},
 				"severity": d.Severity, "source": "goravel-framework", "message": d.Message,
 			})
 		}
-	} else if path := uriToPath(uri); framework.IsTemplateFile(path) {
-		for _, d := range framework.TemplateDiagnostics(path, text, s.cat) {
+	} else if framework.IsTemplateFile(path) {
+		for _, d := range framework.TemplateDiagnostics(path, text, cat) {
 			diags = append(diags, map[string]any{
 				"range":    Range{offsetToPos(text, d.Start), offsetToPos(text, d.End)},
 				"severity": d.Severity, "source": "goravel-tmpl", "message": d.Message,
@@ -841,10 +925,11 @@ func (s *Server) codeAction(raw json.RawMessage) any {
 		return nil
 	}
 	off := posToOffset(text, p.Range.Start)
+	cat := s.catalogForPath(path)
 	actions := []map[string]any{}
 
 	if strings.HasSuffix(uri, ".go") {
-		fi := rawsql.Extract(path, []byte(text), s.cat)
+		fi := rawsql.Extract(path, []byte(text), cat)
 		edit := func(title, kind string, start, end int, newText string) {
 			actions = append(actions, map[string]any{
 				"title": title, "kind": kind,
@@ -853,13 +938,13 @@ func (s *Server) codeAction(raw json.RawMessage) any {
 				}}}},
 			})
 		}
-		if st, en, repl, ok := rawsql.ExpandStar(fi, s.cat, off); ok {
+		if st, en, repl, ok := rawsql.ExpandStar(fi, cat, off); ok {
 			edit("Expand * to explicit columns", "refactor.rewrite", st, en, repl)
 		}
-		if at, code, name, ok := rawsql.GenerateRowStruct(fi, s.cat, off); ok {
+		if at, code, name, ok := rawsql.GenerateRowStruct(fi, cat, off); ok {
 			edit("Generate row struct "+name, "refactor.extract", at, at, code)
 		}
-		if targetFile, insertAt, newText, title, ok := rawsql.AddMissingScanFields(fi, s.cat, off); ok {
+		if targetFile, insertAt, newText, title, ok := rawsql.AddMissingScanFields(fi, cat, off); ok {
 			targetURI := pathToURI(targetFile)
 			targetText := text
 			if filepath.Clean(targetFile) != filepath.Clean(path) {
@@ -875,7 +960,7 @@ func (s *Server) codeAction(raw json.RawMessage) any {
 			})
 		}
 		if d := fi.DocAt(off); d != nil {
-			cfg := indexer.ResolveDBConfig(s.cat)
+			cfg := indexer.ResolveDBConfig(cat)
 			if cfg.Database != "" && (cfg.Host != "" || cfg.Driver == "sqlite" || cfg.Driver == "sqlite3") {
 				actions = append(actions,
 					map[string]any{
@@ -903,13 +988,13 @@ func (s *Server) codeAction(raw json.RawMessage) any {
 
 	var fActions []framework.CodeAction
 	if framework.IsTemplateFile(path) {
-		fActions = append(fActions, framework.TemplateCodeActions(path, text, s.cat, off)...)
+		fActions = append(fActions, framework.TemplateCodeActions(path, text, cat, off)...)
 	} else {
-		fActions = append(fActions, framework.RequestCodeActions(path, text, s.cat, off)...)
-		fActions = append(fActions, framework.ControllerCodeActions(path, text, s.cat, off)...)
-		fActions = append(fActions, framework.ViewCodeActions(path, text, s.cat, off)...)
-		fActions = append(fActions, framework.DriftCodeActions(path, text, s.cat, off)...)
-		fActions = append(fActions, framework.EnvAndLangCodeActions(path, text, s.cat, off)...)
+		fActions = append(fActions, framework.RequestCodeActions(path, text, cat, off)...)
+		fActions = append(fActions, framework.ControllerCodeActions(path, text, cat, off)...)
+		fActions = append(fActions, framework.ViewCodeActions(path, text, cat, off)...)
+		fActions = append(fActions, framework.DriftCodeActions(path, text, cat, off)...)
+		fActions = append(fActions, framework.EnvAndLangCodeActions(path, text, cat, off)...)
 	}
 	for _, a := range fActions {
 		changesByURI := map[string][]map[string]any{}
@@ -959,9 +1044,10 @@ func (s *Server) codeLens(raw json.RawMessage) any {
 	}
 	_ = json.Unmarshal(raw, &p)
 	path := filepath.Clean(uriToPath(p.TextDocument.URI))
+	cat := s.catalogForPath(path)
 	var lenses []map[string]any
 	if framework.IsTemplateFile(path) {
-		for _, tl := range framework.TemplateCodeLenses(path, s.cat) {
+		for _, tl := range framework.TemplateCodeLenses(path, cat) {
 			pos := Position{tl.Line, tl.Col}
 			lenses = append(lenses, map[string]any{
 				"range": Range{pos, pos},
@@ -1130,9 +1216,10 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 		return nil
 	}
 	path := uriToPath(uri)
+	cat := s.catalogForPath(path)
 	var hints []map[string]any
 	if framework.IsTemplateFile(path) {
-		for _, h := range framework.TemplateInlayHints(path, text, s.cat) {
+		for _, h := range framework.TemplateInlayHints(path, text, cat) {
 			hints = append(hints, map[string]any{
 				"position":    offsetToPos(text, h.Offset),
 				"label":       h.Label,
@@ -1145,8 +1232,8 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 	if !strings.HasSuffix(uri, ".go") {
 		return nil
 	}
-	fa := orm.AnalyzeFile(path, []byte(text), s.cat)
-	for _, h := range fa.InlayHints(s.cat) {
+	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	for _, h := range fa.InlayHints(cat) {
 		hints = append(hints, map[string]any{
 			"position":    offsetToPos(text, h.Offset),
 			"label":       h.Label,
@@ -1162,7 +1249,7 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 			"paddingLeft": true,
 		})
 	}
-	for _, h := range framework.RouteInlayHints(path, text, s.cat) {
+	for _, h := range framework.RouteInlayHints(path, text, cat) {
 		hints = append(hints, map[string]any{
 			"position":    offsetToPos(text, h.Offset),
 			"label":       h.Label,
@@ -1170,7 +1257,7 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 			"paddingLeft": true,
 		})
 	}
-	for _, h := range framework.ViewInlayHints(path, text, s.cat) {
+	for _, h := range framework.ViewInlayHints(path, text, cat) {
 		hints = append(hints, map[string]any{
 			"position":    offsetToPos(text, h.Offset),
 			"label":       h.Label,
@@ -1229,10 +1316,11 @@ func (s *Server) semanticTokens(raw json.RawMessage) any {
 		return map[string]any{"data": []int{}}
 	}
 	path := uriToPath(uri)
-	fi := rawsql.Extract(path, []byte(text), s.cat)
-	fa := orm.AnalyzeFile(path, []byte(text), s.cat)
+	cat := s.catalogForPath(path)
+	fi := rawsql.Extract(path, []byte(text), cat)
+	fa := orm.AnalyzeFile(path, []byte(text), cat)
 
-	toks := rawsql.SemanticTokens(fi, s.cat)
+	toks := rawsql.SemanticTokens(fi, cat)
 	seen := map[int]bool{}
 	for _, t := range toks {
 		seen[t.GoStart] = true

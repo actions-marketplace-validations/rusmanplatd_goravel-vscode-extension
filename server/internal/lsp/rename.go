@@ -41,16 +41,18 @@ func (s *Server) rename(raw json.RawMessage) any {
 		})
 	}
 
+	cat := s.catalogForPath(path)
+	root := s.rootForPath(path)
 	var targetConfigKey string
 	var targetRuleName string
 	var targetGateAbility string
 	var targetLangKey string
 	var targetTable, targetColumn string
-	targetViewName, targetViewVarKey, isSharedViewVar := framework.TemplateTargetAtOffset(path, text, s.cat, off)
+	targetViewName, targetViewVarKey, isSharedViewVar := framework.TemplateTargetAtOffset(path, text, cat, off)
 
 	// 1. Check ORM / Config / Validation / Lang / Gate spans
 	if strings.HasSuffix(path, ".go") {
-		fa := orm.AnalyzeFile(path, []byte(text), s.cat)
+		fa := orm.AnalyzeFile(path, []byte(text), cat)
 		if sp := fa.SpanAt(off); sp != nil {
 			relOff := off - sp.Start
 			switch sp.Kind {
@@ -134,14 +136,14 @@ func (s *Server) rename(raw json.RawMessage) any {
 		furi := pathToURI(fpath)
 		if targetViewName != "" || targetViewVarKey != "" {
 			cleanNew := strings.TrimPrefix(newName, ".")
-			for _, sp := range framework.FindViewAndTemplateSpans(fpath, content, s.cat, targetViewName, targetViewVarKey, isSharedViewVar) {
+			for _, sp := range framework.FindViewAndTemplateSpans(fpath, content, cat, targetViewName, targetViewVarKey, isSharedViewVar) {
 				addEdit(furi, content, sp[0], sp[1], cleanNew)
 			}
 		}
 		if !strings.HasSuffix(fpath, ".go") {
 			return
 		}
-		ffa := orm.AnalyzeFile(fpath, []byte(content), s.cat)
+		ffa := orm.AnalyzeFile(fpath, []byte(content), cat)
 		for _, sp := range ffa.Spans {
 			if targetConfigKey != "" && sp.Kind == orm.SpanConfigKey && sp.Text == targetConfigKey {
 				addEdit(furi, content, sp.Start, sp.End, newName)
@@ -176,9 +178,9 @@ func (s *Server) rename(raw json.RawMessage) any {
 			}
 		}
 		if targetTable != "" && targetColumn != "" {
-			fi := rawsql.Extract(fpath, []byte(content), s.cat)
+			fi := rawsql.Extract(fpath, []byte(content), cat)
 			for _, d := range fi.Docs {
-				sc := fi.BuildScope(d, s.cat)
+				sc := fi.BuildScope(d, cat)
 				for _, ref := range d.Refs(sc) {
 					if ref.Table != nil && strings.EqualFold(ref.Table.Name, targetTable) &&
 						ref.Column != nil && strings.EqualFold(ref.Column.Name, targetColumn) {
@@ -201,8 +203,8 @@ func (s *Server) rename(raw json.RawMessage) any {
 			scanFile(fp, doc)
 		}
 	}
-	if s.root != "" {
-		_ = filepath.WalkDir(s.root, func(fp string, d fs.DirEntry, err error) error {
+	if root != "" {
+		_ = filepath.WalkDir(root, func(fp string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -229,7 +231,7 @@ func (s *Server) rename(raw json.RawMessage) any {
 
 	// Also update definition sites for config key, custom rule signature, or gate ability
 	if targetConfigKey != "" {
-		if ci := s.cat.Config(targetConfigKey); ci != nil && ci.Loc.Valid() {
+		if ci := cat.Config(targetConfigKey); ci != nil && ci.Loc.Valid() {
 			oldLeaf := targetConfigKey
 			if i := strings.LastIndexByte(targetConfigKey, '.'); i >= 0 {
 				oldLeaf = targetConfigKey[i+1:]
@@ -250,7 +252,7 @@ func (s *Server) rename(raw json.RawMessage) any {
 		}
 	}
 	if targetRuleName != "" {
-		if ri := s.cat.Rule(targetRuleName); ri != nil && ri.Custom && ri.Loc.Valid() {
+		if ri := cat.Rule(targetRuleName); ri != nil && ri.Custom && ri.Loc.Valid() {
 			if b, err := os.ReadFile(ri.Loc.File); err == nil {
 				content := string(b)
 				target := `"` + targetRuleName + `"`
@@ -261,7 +263,7 @@ func (s *Server) rename(raw json.RawMessage) any {
 		}
 	}
 	if targetGateAbility != "" {
-		if gi := s.cat.Gates[targetGateAbility]; gi != nil && gi.Loc.Valid() {
+		if gi := cat.Gates[targetGateAbility]; gi != nil && gi.Loc.Valid() {
 			if b, err := os.ReadFile(gi.Loc.File); err == nil {
 				content := string(b)
 				lineOff := posToOffset(content, Position{gi.Loc.Line, gi.Loc.Col})

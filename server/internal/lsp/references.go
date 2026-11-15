@@ -19,16 +19,18 @@ func (s *Server) references(raw json.RawMessage) any {
 		return nil
 	}
 
+	cat := s.catalogForPath(path)
+	root := s.rootForPath(path)
 	var targetConfigKey string
 	var targetRuleName string
 	var targetLangKey string
 	var targetGateAbility string
 	var targetTable, targetColumn string
-	targetViewName, targetViewVarKey, isSharedViewVar := framework.TemplateTargetAtOffset(path, text, s.cat, off)
+	targetViewName, targetViewVarKey, isSharedViewVar := framework.TemplateTargetAtOffset(path, text, cat, off)
 
 	// 1. Check ORM / Config / Validation / Lang / Gate spans
 	if strings.HasSuffix(path, ".go") {
-		fa := orm.AnalyzeFile(path, []byte(text), s.cat)
+		fa := orm.AnalyzeFile(path, []byte(text), cat)
 		if sp := fa.SpanAt(off); sp != nil {
 			relOff := off - sp.Start
 			switch sp.Kind {
@@ -85,8 +87,8 @@ func (s *Server) references(raw json.RawMessage) any {
 	// 3. Check definition locations (config/*.go, app/rules/*.go, app/models/*.go)
 	cleanPath := filepath.Clean(path)
 	if targetConfigKey == "" && strings.Contains(filepath.ToSlash(cleanPath), "/config/") {
-		for _, k := range s.cat.ConfigKeys() {
-			ci := s.cat.Config(k)
+		for _, k := range cat.ConfigKeys() {
+			ci := cat.Config(k)
 			if ci.Loc.Valid() && filepath.Clean(ci.Loc.File) == cleanPath && ci.Loc.Line == p.Position.Line {
 				targetConfigKey = ci.Key
 				break
@@ -94,8 +96,8 @@ func (s *Server) references(raw json.RawMessage) any {
 		}
 	}
 	if targetRuleName == "" && strings.Contains(filepath.ToSlash(cleanPath), "/app/rules/") {
-		for _, rn := range s.cat.RuleNames() {
-			ri := s.cat.Rule(rn)
+		for _, rn := range cat.RuleNames() {
+			ri := cat.Rule(rn)
 			if ri.Custom && ri.Loc.Valid() && filepath.Clean(ri.Loc.File) == cleanPath {
 				targetRuleName = ri.Name
 				break
@@ -103,8 +105,8 @@ func (s *Server) references(raw json.RawMessage) any {
 		}
 	}
 	if targetTable == "" && strings.Contains(filepath.ToSlash(cleanPath), "/app/models/") {
-		for _, tn := range s.cat.TableNames() {
-			t := s.cat.Table(tn)
+		for _, tn := range cat.TableNames() {
+			t := cat.Table(tn)
 			if t.Loc.Valid() && filepath.Clean(t.Loc.File) == cleanPath && t.Loc.Line == p.Position.Line {
 				targetTable = t.Name
 				break
@@ -130,7 +132,7 @@ func (s *Server) references(raw json.RawMessage) any {
 	scanFile := func(fpath, content string) {
 		furi := pathToURI(fpath)
 		if targetViewName != "" || targetViewVarKey != "" {
-			for _, sp := range framework.FindViewAndTemplateSpans(fpath, content, s.cat, targetViewName, targetViewVarKey, isSharedViewVar) {
+			for _, sp := range framework.FindViewAndTemplateSpans(fpath, content, cat, targetViewName, targetViewVarKey, isSharedViewVar) {
 				locs = append(locs, LocationT{furi, Range{offsetToPos(content, sp[0]), offsetToPos(content, sp[1])}})
 			}
 		}
@@ -138,7 +140,7 @@ func (s *Server) references(raw json.RawMessage) any {
 			return
 		}
 		if targetConfigKey != "" || targetRuleName != "" || targetLangKey != "" || targetGateAbility != "" || targetColumn != "" {
-			ffa := orm.AnalyzeFile(fpath, []byte(content), s.cat)
+			ffa := orm.AnalyzeFile(fpath, []byte(content), cat)
 			for _, sp := range ffa.Spans {
 				if targetConfigKey != "" && sp.Kind == orm.SpanConfigKey && sp.Text == targetConfigKey {
 					locs = append(locs, LocationT{furi, Range{offsetToPos(content, sp.Start), offsetToPos(content, sp.End)}})
@@ -178,9 +180,9 @@ func (s *Server) references(raw json.RawMessage) any {
 			}
 		}
 		if targetTable != "" {
-			fi := rawsql.Extract(fpath, []byte(content), s.cat)
+			fi := rawsql.Extract(fpath, []byte(content), cat)
 			for _, d := range fi.Docs {
-				sc := fi.BuildScope(d, s.cat)
+				sc := fi.BuildScope(d, cat)
 				for _, ref := range d.Refs(sc) {
 					if ref.Table == nil || !strings.EqualFold(ref.Table.Name, targetTable) {
 						continue
@@ -211,8 +213,8 @@ func (s *Server) references(raw json.RawMessage) any {
 			scanFile(fp, doc)
 		}
 	}
-	if s.root != "" {
-		_ = filepath.WalkDir(s.root, func(fp string, d fs.DirEntry, err error) error {
+	if root != "" {
+		_ = filepath.WalkDir(root, func(fp string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}

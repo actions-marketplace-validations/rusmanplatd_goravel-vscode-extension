@@ -1157,3 +1157,41 @@ func GetPerms() string {
 		t.Errorf("expected both unqualified CTE and qualified unknown_column errors (unqual=%v, qual=%v), got %+v", unqualErr, qualErr, diags)
 	}
 }
+
+func TestMultiRootWorkspaceViewDiagnostics(t *testing.T) {
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+
+	writeTempFile(t, root1, "resources/views/welcome.tmpl", `<h1>{{ .title }}</h1>`)
+	sharedPath := writeTempFile(t, root2, "resources/views/shared.tmpl", `<p>app-shared: {{ .name }}</p>`)
+	webSrc := `package routes
+import "goravel/app/facades"
+func Web() {
+	facades.Route().Get("shared", func(ctx any) any {
+		return ctx.(interface{ Response() any }).Response()
+	})
+	_ = facades.View().Make("shared.tmpl", map[string]any{"name": "Goravel"})
+}
+`
+	webPath := writeTempFile(t, root2, "routes/web.go", webSrc)
+
+	srv := New(strings.NewReader(""), &bytes.Buffer{})
+	initParams, _ := json.Marshal(map[string]any{
+		"rootUri": pathToURI(root1),
+		"workspaceFolders": []map[string]any{
+			{"uri": pathToURI(root1), "name": "app1"},
+			{"uri": pathToURI(root2), "name": "app2"},
+		},
+	})
+	srv.dispatch(&message{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: initParams})
+
+	webCat := srv.catalogForPath(webPath)
+	if vDiags := framework.ViewDiagnostics(webPath, webSrc, webCat); len(vDiags) > 0 {
+		t.Errorf("expected no missing view diagnostics in second workspace root, got %+v", vDiags)
+	}
+	sharedSrc := `<p>app-shared: {{ .name }}</p>`
+	sharedCat := srv.catalogForPath(sharedPath)
+	if tDiags := framework.TemplateDiagnostics(sharedPath, sharedSrc, sharedCat); len(tDiags) > 0 {
+		t.Errorf("expected no template diagnostics for shared.tmpl in second workspace root, got %+v", tDiags)
+	}
+}
