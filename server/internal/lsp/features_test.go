@@ -1022,3 +1022,51 @@ func (c *ProfileController) Show(ctx http.Context) http.Response {
 		t.Errorf("expected TemplateHover on bare '.', got %+v", hovBareDot)
 	}
 }
+
+func TestCheckSQLAndFalsePositivePrevention(t *testing.T) {
+	root := t.TempDir()
+	writeTempFile(t, root, "app/models/user_setting.go", `package models
+type UserSetting struct {
+	ID           string `+"`gorm:\"column:id\"`"+`
+	SettingsJSON string `+"`gorm:\"column:settings_json\"`"+`
+	BirthDate    string `+"`gorm:\"column:birth_date\"`"+`
+}
+func (UserSetting) TableName() string { return "user_settings" }
+`)
+	writeTempFile(t, root, "app/repositories/user_setting_repo.go", `package repositories
+import (
+	"fmt"
+	"goravel/app/facades"
+	"goravel/app/models"
+)
+func FindValid() error {
+	tbl := (models.UserSetting{}).TableName()
+	query := "SELECT id, settings_json FROM " + tbl + " WHERE EXTRACT(DOY FROM birth_date) = EXTRACT(DOY FROM CURRENT_DATE) AND id = $1"
+	var res models.UserSetting
+	if err := facades.DB().Select(&res, query, "123"); err != nil {
+		return fmt.Errorf("update user setting failed: %w", err)
+	}
+	return nil
+}
+`)
+	if code := CheckSQL(root); code != 0 {
+		t.Fatalf("expected CheckSQL to pass with exit code 0 on valid SQL, got %d", code)
+	}
+
+	// Now introduce a real SQL error (missing placeholder argument & unknown column)
+	writeTempFile(t, root, "app/repositories/bad_repo.go", `package repositories
+import (
+	"goravel/app/facades"
+	"goravel/app/models"
+)
+func FindBroken() error {
+	tbl := (models.UserSetting{}).TableName()
+	query := "SELECT id, nonexistent_col FROM " + tbl + " WHERE id = $1 AND settings_json = $2"
+	var res models.UserSetting
+	return facades.DB().Select(&res, query, "only-one-arg")
+}
+`)
+	if code := CheckSQL(root); code == 0 {
+		t.Fatalf("expected CheckSQL to fail with non-zero exit code on broken SQL, got 0")
+	}
+}

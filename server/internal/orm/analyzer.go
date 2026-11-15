@@ -1255,8 +1255,27 @@ func (fa *FileAnalysis) Definition(goOff int, cat *indexer.Catalog) []indexer.Lo
 
 // Diagnostics validates ORM columns, relations, joins, patch keys, config/env keys, lang keys, gates, and validation rules.
 func (fa *FileAnalysis) Diagnostics(cat *indexer.Catalog) []rawsql.Diag {
-	out := append([]rawsql.Diag(nil), fa.ExtraDiags...)
+	return fa.diagnosticsFiltered(cat, false)
+}
+
+// SQLDiagnostics validates only SQL/ORM-related spans (columns, relations, joins, patch keys, WHERE/ORDER clauses).
+func (fa *FileAnalysis) SQLDiagnostics(cat *indexer.Catalog) []rawsql.Diag {
+	return fa.diagnosticsFiltered(cat, true)
+}
+
+func (fa *FileAnalysis) diagnosticsFiltered(cat *indexer.Catalog, onlySQL bool) []rawsql.Diag {
+	var out []rawsql.Diag
+	if !onlySQL {
+		out = append(out, fa.ExtraDiags...)
+	}
 	for _, sp := range fa.Spans {
+		if onlySQL {
+			switch sp.Kind {
+			case SpanORMColumn, SpanPatchKey, SpanORMOrder, SpanORMWhere, SpanORMJoin, SpanORMRelation:
+			default:
+				continue
+			}
+		}
 		switch sp.Kind {
 		case SpanORMColumn, SpanPatchKey:
 			if sp.Table == nil || strings.Contains(sp.Text, "(") || strings.Contains(sp.Text, "*") {

@@ -11,25 +11,85 @@ import (
 // Scope maps aliases / table names (lowercase) to tables for one Go function.
 type Scope map[string]*indexer.Table
 
-var aliasRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|UPDATE|INTO)\s+([A-Za-z_][\w."]*)(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?`)
+var aliasRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|UPDATE|(?:INSERT|MERGE)\s+(?:OR\s+\w+\s+)?INTO)\s+([A-Za-z_][\w."]*)(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?`)
 
 var funcAliasRe = regexp.MustCompile(`\)\s+(?:AS\s+)?([A-Za-z_]\w*)\s*\(`)
 
 var notAlias = map[string]bool{}
 
 func init() {
-	for _, w := range strings.Fields("where left right inner outer join on set group order limit offset values using cross full returning union having select from and or as natural for") {
+	for _, w := range strings.Fields("where left right inner outer join on set group order limit offset values using cross full returning union having select from and or as natural for to only") {
 		notAlias[w] = true
 	}
 }
 
+// isFalseAliasKeywordMatch returns true when a FROM/UPDATE match in aliasRe is actually
+// EXTRACT(... FROM expr), TRIM(... FROM expr), SUBSTRING(... FROM expr), IS [NOT] DISTINCT FROM,
+// FOR UPDATE, or ON CONFLICT DO UPDATE.
+func isFalseAliasKeywordMatch(cleanSQL string, matchStart int) bool {
+	kw := strings.ToUpper(cleanSQL[matchStart:])
+	before := strings.TrimRight(cleanSQL[:matchStart], " \t\r\n")
+	upBefore := strings.ToUpper(before)
+	if strings.HasPrefix(kw, "UPDATE") {
+		if strings.HasSuffix(upBefore, "FOR") || strings.HasSuffix(upBefore, "DO") {
+			return true
+		}
+		return false
+	}
+	if strings.HasPrefix(kw, "FROM") {
+		if strings.HasSuffix(upBefore, "DISTINCT") {
+			return true
+		}
+		// Check if inside EXTRACT(... FROM ...), TRIM(... FROM ...), SUBSTRING(... FROM ...), OVERLAY(... FROM ...)
+		depth := 0
+		for i := matchStart - 1; i >= 0; i-- {
+			switch cleanSQL[i] {
+			case ')':
+				depth++
+			case '(':
+				if depth > 0 {
+					depth--
+				} else {
+					fn := strings.TrimRight(cleanSQL[:i], " \t\r\n")
+					upFn := strings.ToUpper(fn)
+					for _, fnKw := range []string{"EXTRACT", "TRIM", "BTRIM", "LTRIM", "RTRIM", "SUBSTRING", "OVERLAY"} {
+						if strings.HasSuffix(upFn, fnKw) {
+							return true
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+	return false
+}
+
+func isSystemTable(tbl string) bool {
+	raw := strings.ToLower(strings.Trim(tbl, "\"`"))
+	if strings.HasPrefix(raw, "pg_catalog.") || strings.HasPrefix(raw, "information_schema.") {
+		return true
+	}
+	stripped := indexer.StripSchema(tbl)
+	return strings.HasPrefix(stripped, "pg_")
+}
+
+var explicitTableClauseRe = regexp.MustCompile(`(?i)\b(?:FROM|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\b`)
+
 // BuildScope collects aliases from target first, then inherits non-conflicting
-// aliases from other docs in the same function. It also synthesizes virtual
-// tables for CTEs (WITH cte AS (...)) and derived subqueries (FROM (...) sub).
+// aliases from other docs in the same function when target is a query fragment.
+// It also synthesizes virtual tables for CTEs (WITH cte AS (...)) and derived subqueries (FROM (...) sub).
 func (fi *FileInfo) BuildScope(target *Doc, cat *indexer.Catalog) Scope {
 	sc := Scope{}
 	// 1. Collect from target doc first (never overridden by other docs in same func)
 	target.collectScope(sc, cat)
+
+	// If target is already a standalone top-level SQL statement with its own FROM/UPDATE/INSERT INTO clause,
+	// do not inherit tables from other statements in the same Go function.
+	cleanTarget := maskStringLiterals(target.Text)
+	if topStmtRe.MatchString(cleanTarget) && explicitTableClauseRe.MatchString(cleanTarget) {
+		return sc
+	}
 
 	// 2. Inherit non-conflicting aliases from other docs in the same function
 	other := Scope{}
@@ -60,9 +120,13 @@ func (fi *FileInfo) BuildScope(target *Doc, cat *indexer.Catalog) Scope {
 }
 
 func (d *Doc) collectScope(sc Scope, cat *indexer.Catalog) {
+	if isDDL(d.Text) {
+		return
+	}
+	clean := maskStringLiterals(d.Text)
 	// Skip derived function aliases like `fn() t(col)`
 	derivedSkip := map[string]bool{}
-	for _, m := range funcAliasRe.FindAllStringSubmatch(d.Text, -1) {
+	for _, m := range funcAliasRe.FindAllStringSubmatch(clean, -1) {
 		derivedSkip[strings.ToLower(m[1])] = true
 	}
 
@@ -72,21 +136,29 @@ func (d *Doc) collectScope(sc Scope, cat *indexer.Catalog) {
 		sc[k] = t
 	}
 
-	// 2. Physical tables & CTEs referenced in FROM/JOIN/UPDATE/INTO
-	for _, m := range aliasRe.FindAllStringSubmatch(d.Text, -1) {
-		t := cat.Table(m[1])
+	// 2. Physical tables & CTEs referenced in FROM/JOIN/UPDATE/INSERT INTO
+	for _, idx := range aliasRe.FindAllStringSubmatchIndex(clean, -1) {
+		if isFalseAliasKeywordMatch(clean, idx[0]) {
+			continue
+		}
+		m1 := d.Text[idx[2]:idx[3]]
+		m2 := ""
+		if idx[4] >= 0 {
+			m2 = d.Text[idx[4]:idx[5]]
+		}
+		t := cat.Table(m1)
 		if t == nil {
-			t = ctes[strings.ToLower(indexer.StripSchema(m[1]))]
+			t = ctes[strings.ToLower(indexer.StripSchema(m1))]
 		}
 		if t == nil {
 			continue
 		}
-		k := strings.ToLower(indexer.StripSchema(m[1]))
+		k := strings.ToLower(indexer.StripSchema(m1))
 		if !derivedSkip[k] {
 			sc[k] = t
 		}
-		if m[2] != "" {
-			ak := strings.ToLower(m[2])
+		if m2 != "" {
+			ak := strings.ToLower(m2)
 			if !notAlias[ak] && !derivedSkip[ak] {
 				sc[ak] = t
 			}
@@ -132,7 +204,15 @@ type Issue struct {
 	Message      string
 }
 
-var ddl = regexp.MustCompile(`(?is)^\s*(CREATE|ALTER|DROP|DO|TRUNCATE|COMMENT|GRANT)\s`)
+var (
+	ddl     = regexp.MustCompile(`(?is)^\s*(CREATE|ALTER|DROP|DO|TRUNCATE|COMMENT|GRANT|REVOKE|SET|BEGIN|COMMIT)\b`)
+	ddlBody = regexp.MustCompile(`(?is)\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|INDEX|UNIQUE\s+INDEX|VIEW|MATERIALIZED\s+VIEW|FUNCTION|PROCEDURE|TRIGGER|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE)|ALTER\s+(?:TABLE|DEFAULT\s+PRIVILEGES|SCHEMA|ROLE|DATABASE)|DROP\s+(?:TABLE|INDEX|VIEW|FUNCTION|PROCEDURE|TRIGGER|POLICY|SCHEMA|EXTENSION|TYPE)|GRANT\s+(?:ALL|SELECT|INSERT|UPDATE|DELETE|USAGE|EXECUTE)|REVOKE\s+(?:ALL|SELECT|INSERT|UPDATE|DELETE|USAGE|EXECUTE)|LANGUAGE\s+(?:plpgsql|sql)|SECURITY\s+DEFINER)\b`)
+)
+
+func isDDL(sql string) bool {
+	clean := maskStringLiterals(sql)
+	return ddl.MatchString(clean) || ddlBody.MatchString(clean)
+}
 
 var dotRe = regexp.MustCompile(`([A-Za-z_]\w*)\.([A-Za-z_]\w*)`)
 
@@ -145,24 +225,37 @@ func (d *Doc) Check(sc Scope) []Issue {
 // and unqualified column references against the schema catalog.
 func (d *Doc) CheckWithCatalog(sc Scope, cat *indexer.Catalog) []Issue {
 	var out []Issue
-	if ddl.MatchString(d.Text) {
+	if isDDL(d.Text) {
 		return nil // DDL/policy statements reuse aliases; too ambiguous to validate
 	}
 
 	out = append(out, checkSQLSyntax(d.Text, d.Dynamic)...)
 
+	clean := maskStringLiterals(d.Text)
 	hasUnknownTable := false
 	if cat != nil && len(cat.Tables) > 0 {
 		ctes := extractCTEs(d.Text, sc, cat)
-		for _, m := range aliasRe.FindAllStringSubmatchIndex(d.Text, -1) {
+		for _, m := range aliasRe.FindAllStringSubmatchIndex(clean, -1) {
+			if isFalseAliasKeywordMatch(clean, m[0]) {
+				continue
+			}
 			tbl := d.Text[m[2]:m[3]]
 			low := strings.ToLower(indexer.StripSchema(tbl))
-			if strings.HasPrefix(tbl, "__") || strings.Contains(tbl, "__") || notAlias[low] || ctes[low] != nil {
+			if strings.HasPrefix(tbl, "__") || strings.Contains(tbl, "__") {
+				hasUnknownTable = true
+				continue
+			}
+			if notAlias[low] || ctes[low] != nil {
+				continue
+			}
+			if isSystemTable(tbl) {
+				hasUnknownTable = true
 				continue
 			}
 			// Skip table-valued functions like FROM unnest(...)
-			after := strings.TrimSpace(d.Text[m[3]:])
+			after := strings.TrimSpace(clean[m[3]:])
 			if strings.HasPrefix(after, "(") {
+				hasUnknownTable = true
 				continue
 			}
 			if cat.Table(tbl) == nil {
@@ -172,9 +265,9 @@ func (d *Doc) CheckWithCatalog(sc Scope, cat *indexer.Catalog) []Issue {
 		}
 	}
 
-	for _, m := range dotRe.FindAllStringSubmatchIndex(d.Text, -1) {
+	for _, m := range dotRe.FindAllStringSubmatchIndex(clean, -1) {
 		if m[0] > 0 {
-			if p := d.Text[m[0]-1]; p == '.' || p == '"' || p == '\'' || p == '_' {
+			if p := clean[m[0]-1]; p == '.' || p == '"' || p == '\'' || p == '_' {
 				continue
 			}
 		}
@@ -186,7 +279,7 @@ func (d *Doc) CheckWithCatalog(sc Scope, cat *indexer.Catalog) []Issue {
 		}
 		if t.Column(col) != nil {
 			// Index-aware hint for WHERE / ON filters on tables with known indexes
-			if len(t.Indexes) > 0 && !t.HasIndex(col) && !strings.EqualFold(col, "deleted_at") && isFilterContext(d.Text, m[0]) {
+			if len(t.Indexes) > 0 && !t.HasIndex(col) && !strings.EqualFold(col, "deleted_at") && isFilterContext(clean, m[0]) {
 				out = append(out, Issue{m[4], m[5], 4, fmt.Sprintf("Column '%s' on '%s' is not the leading column of any indexed migration", col, t.Name)})
 			}
 			continue

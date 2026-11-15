@@ -5,3 +5,6 @@ client/
 node_modules/
 tsconfig.json
 **/*.vsix
+dist/releases/
+action.yml
+install.sh

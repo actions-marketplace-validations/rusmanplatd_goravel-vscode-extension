@@ -1,0 +1,70 @@
+name: "goravel-lsp"
+description: "Run goravel-lsp static SQL & Goravel ORM/Framework checker in GitHub Actions (like golangci-lint)"
+author: "rusmanplatd"
+branding:
+  icon: "database"
+  color: "blue"
+
+inputs:
+  version:
+    description: "Version of goravel-lsp to use (e.g. 'latest', 'v0.7.1', or 'main')"
+    required: false
+    default: "latest"
+  working-directory:
+    description: "Working directory of the Goravel project to analyze"
+    required: false
+    default: "."
+  args:
+    description: "Command line arguments for goravel-lsp (default: '--check-sql')"
+    required: false
+    default: "--check-sql"
+  only-sql:
+    description: "Check only SQL and ORM database queries (skip non-SQL framework diagnostics)"
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install goravel-lsp
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        INSTALL_DIR="${RUNNER_TEMP:-/tmp}/goravel-lsp-bin"
+        mkdir -p "$INSTALL_DIR"
+
+        if [ "$INPUT_VERSION" = "main" ] || [ "$INPUT_VERSION" = "source" ] || [ -d "${GITHUB_ACTION_PATH}/server" ]; then
+          if [ "$INPUT_VERSION" != "latest" ] && [ "$INPUT_VERSION" != "main" ] && [ "$INPUT_VERSION" != "source" ]; then
+            sh "${GITHUB_ACTION_PATH}/install.sh" -b "$INSTALL_DIR" "$INPUT_VERSION"
+          elif [ -d "${GITHUB_ACTION_PATH}/server" ] && command -v go >/dev/null 2>&1; then
+            echo "Building goravel-lsp from ${GITHUB_ACTION_PATH}/server..."
+            (
+              cd "${GITHUB_ACTION_PATH}/server"
+              CGO_ENABLED=0 go build -ldflags="-s -w" -o "${INSTALL_DIR}/goravel-lsp" .
+            )
+          else
+            sh "${GITHUB_ACTION_PATH}/install.sh" -b "$INSTALL_DIR" "$INPUT_VERSION"
+          fi
+        else
+          sh "${GITHUB_ACTION_PATH}/install.sh" -b "$INSTALL_DIR" "$INPUT_VERSION"
+        fi
+
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+        "${INSTALL_DIR}/goravel-lsp" --version
+
+    - name: Run goravel-lsp
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_ONLY_SQL: ${{ inputs.only-sql }}
+      run: |
+        set -euo pipefail
+        EXTRA_FLAGS="--out-format=github-actions"
+        if [ "$INPUT_ONLY_SQL" = "true" ]; then
+          EXTRA_FLAGS="$EXTRA_FLAGS --only-sql"
+        fi
+        goravel-lsp $INPUT_ARGS $EXTRA_FLAGS .
+

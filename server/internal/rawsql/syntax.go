@@ -8,7 +8,7 @@ import (
 
 var (
 	topStmtRe       = regexp.MustCompile(`(?is)^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b`)
-	danglingCommaRe = regexp.MustCompile(`(?i),\s*(?:FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET|SET|VALUES|RETURNING|UNION|EXCEPT|INTERSECT|\)|$)`)
+	danglingCommaRe = regexp.MustCompile(`(?i),\s*(?:\b(?:FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET|SET|VALUES|RETURNING|UNION|EXCEPT|INTERSECT)\b|\)|$)`)
 	emptySelectRe   = regexp.MustCompile(`(?is)\bSELECT\s+(?:DISTINCT\s+)?FROM\b`)
 	trailingClause  = regexp.MustCompile(`(?is)\b(SELECT|FROM|WHERE|JOIN|ON|SET|VALUES|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET)\s*$`)
 	doubleCommaRe   = regexp.MustCompile(`,\s*,`)
@@ -22,17 +22,19 @@ func checkSQLSyntax(sql string, dynamic bool) []Issue {
 		return nil
 	}
 
+	noComments := maskSQLComments(sql)
+
 	// 1. Check balanced quotes and parentheses
 	inSingle := false
 	inDouble := false
 	quoteStart := -1
 	var parenStack []int
 
-	for i := 0; i < len(sql); i++ {
-		c := sql[i]
+	for i := 0; i < len(noComments); i++ {
+		c := noComments[i]
 		if inSingle {
 			if c == '\'' {
-				if i+1 < len(sql) && sql[i+1] == '\'' {
+				if i+1 < len(noComments) && noComments[i+1] == '\'' {
 					i++
 					continue
 				}
@@ -42,7 +44,7 @@ func checkSQLSyntax(sql string, dynamic bool) []Issue {
 		}
 		if inDouble {
 			if c == '"' {
-				if i+1 < len(sql) && sql[i+1] == '"' {
+				if i+1 < len(noComments) && noComments[i+1] == '"' {
 					i++
 					continue
 				}
@@ -74,14 +76,14 @@ func checkSQLSyntax(sql string, dynamic bool) []Issue {
 		out = append(out, Issue{quoteStart, quoteStart + 1, 1, "SQL syntax error: unclosed quoted identifier"})
 	}
 
-	isFullStmt := topStmtRe.MatchString(sql)
+	// Strip string literals and comments for structural regex checks
+	clean := maskStringLiterals(sql)
+
+	isFullStmt := topStmtRe.MatchString(clean)
 	if isFullStmt && !dynamic && len(parenStack) > 0 {
 		p := parenStack[len(parenStack)-1]
 		out = append(out, Issue{p, p + 1, 1, "SQL syntax error: unclosed parenthesis '('"})
 	}
-
-	// Strip string literals for structural regex checks
-	clean := maskStringLiterals(sql)
 
 	if m := danglingCommaRe.FindStringIndex(clean); m != nil {
 		out = append(out, Issue{m[0], m[0] + 1, 1, "SQL syntax error: dangling comma"})
@@ -109,8 +111,69 @@ func checkSQLSyntax(sql string, dynamic bool) []Issue {
 	return out
 }
 
-func maskStringLiterals(sql string) string {
+func maskSQLComments(sql string) string {
 	b := []byte(sql)
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(b); i++ {
+		if inSingle {
+			if b[i] == '\'' {
+				if i+1 < len(b) && b[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if b[i] == '"' {
+				if i+1 < len(b) && b[i+1] == '"' {
+					i++
+					continue
+				}
+				inDouble = false
+			}
+			continue
+		}
+		if b[i] == '\'' {
+			inSingle = true
+			continue
+		}
+		if b[i] == '"' {
+			inDouble = true
+			continue
+		}
+		// Line comment -- ...
+		if b[i] == '-' && i+1 < len(b) && b[i+1] == '-' {
+			for i < len(b) && b[i] != '\n' {
+				b[i] = ' '
+				i++
+			}
+			continue
+		}
+		// Block comment /* ... */
+		if b[i] == '/' && i+1 < len(b) && b[i+1] == '*' {
+			b[i], b[i+1] = ' ', ' '
+			i += 2
+			for i < len(b) {
+				if b[i] == '*' && i+1 < len(b) && b[i+1] == '/' {
+					b[i], b[i+1] = ' ', ' '
+					i++
+					break
+				}
+				if b[i] != '\n' {
+					b[i] = ' '
+				}
+				i++
+			}
+		}
+	}
+	return string(b)
+}
+
+func maskStringLiterals(sql string) string {
+	b := []byte(maskSQLComments(sql))
 	inSingle := false
 	for i := 0; i < len(b); i++ {
 		if inSingle {
@@ -123,7 +186,9 @@ func maskStringLiterals(sql string) string {
 				inSingle = false
 				continue
 			}
-			b[i] = ' '
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
 			continue
 		}
 		if b[i] == '\'' {
@@ -142,6 +207,7 @@ func init() {
 		"with recursive case when then else end cast like ilike similar to between exists any some " +
 		"over partition filter within extract epoch from interval current_timestamp current_date " +
 		"current_time localtimestamp default excluded conflict do nothing coalesce nullif " +
+		"doy dow isodow isoyear year month day hour minute second week quarter century decade millennium milliseconds microseconds timezone timezone_hour timezone_minute " +
 		"count sum avg min max now lower upper trim btrim ltrim rtrim length substr substring " +
 		"concat replace split_part to_char to_date to_timestamp date_trunc age row_number rank dense_rank " +
 		"int integer bigint smallint serial bigserial text varchar char boolean bool float double " +

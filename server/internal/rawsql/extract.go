@@ -45,7 +45,32 @@ type FileInfo struct {
 	TableVars map[string]string // go var name -> table name
 }
 
-var sqlish = regexp.MustCompile(`(?is)^\s*(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|WITH|CREATE|ALTER|DROP|TRUNCATE|AND|OR|WHERE|ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET|LEFT\s+JOIN|INNER\s+JOIN|RIGHT\s+JOIN|JOIN|SET|FROM|ON)\s`)
+var (
+	sqlish = regexp.MustCompile(`(?is)^\s*(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|WITH|CREATE|ALTER|DROP|TRUNCATE|AND|OR|WHERE|ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET|LEFT\s+JOIN|INNER\s+JOIN|RIGHT\s+JOIN|JOIN|SET|FROM|ON)\s`)
+
+	standaloneSQLRe = regexp.MustCompile(`(?is)^\s*(?:` +
+		`SELECT\b.+\bFROM\b|` +
+		`INSERT\s+INTO\b.+\b(?:VALUES|SELECT)\b|` +
+		`UPDATE\s+[A-Za-z_][\w."]*\s+(?:(?:AS\s+)?[A-Za-z_]\w*\s+)?SET\b|` +
+		`DELETE\s+FROM\s+[A-Za-z_]|` +
+		`WITH\b.+\bAS\s*\(|` +
+		`(?:CREATE|ALTER|DROP|TRUNCATE)\s+(?:OR\s+REPLACE\s+)?(?:TABLE|INDEX|UNIQUE\s+INDEX|VIEW|MATERIALIZED\s+VIEW|FUNCTION|PROCEDURE|TRIGGER|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE|DEFAULT\s+PRIVILEGES)\b` +
+		`)`)
+
+	clauseFragmentSQLRe = regexp.MustCompile(`(?is)^\s*(?:` +
+		`(?:WHERE|AND|OR|HAVING|ON)\s+.+(?:=|<|>|\bIS\s+(?:NOT\s+)?NULL\b|\bIN\s*\(|\bLIKE\b|\bILIKE\b|\bBETWEEN\b|\$\d+|\?)|` +
+		`(?:LEFT\s+|RIGHT\s+|INNER\s+|FULL\s+|CROSS\s+)?JOIN\s+.+\bON\b|` +
+		`ORDER\s+BY\s+[A-Za-z_][\w.]*(?:\s+(?:ASC|DESC|NULLS\s+(?:FIRST|LAST)))?\s*(?:,|$)|` +
+		`GROUP\s+BY\s+[A-Za-z_][\w.]*\s*(?:,|$)|` +
+		`LIMIT\s+(?:\$\d+|\?|\d+)|` +
+		`OFFSET\s+(?:\$\d+|\?|\d+)` +
+		`)`)
+)
+
+func isStandaloneOrFragmentSQL(text string) bool {
+	clean := maskSQLComments(text)
+	return standaloneSQLRe.MatchString(clean) || clauseFragmentSQLRe.MatchString(clean)
+}
 
 // Extract parses Go source and returns its SQL docs. Table-name variables are
 // resolved via the catalog (x := (models.T{}).TableName(ctx)).
@@ -79,10 +104,23 @@ func Extract(path string, src []byte, cat *indexer.Catalog) *FileInfo {
 		return true
 	})
 
+	resolveSprintfArgTable := func(arg ast.Expr) string {
+		if id, ok := arg.(*ast.Ident); ok {
+			if t, exists := vars[id.Name]; exists {
+				return t
+			}
+		}
+		if tname := extractTableNameExpr(arg, cat); tname != "" {
+			return tname
+		}
+		return ""
+	}
+
 	build := func(e ast.Expr, fn int, env map[string][]ast.Expr) *Doc {
 		d := &Doc{Func: fn, GoStart: off(e.Pos()), GoEnd: off(e.End())}
 		var sb strings.Builder
 		phIdx := 1
+		var sprintfTables []string
 		var flat func(e ast.Expr, depth int, inSprintf bool)
 		flat = func(e ast.Expr, depth int, inSprintf bool) {
 			switch x := e.(type) {
@@ -98,7 +136,7 @@ func Extract(path string, src []byte, cat *indexer.Catalog) *FileInfo {
 				}
 				raw := string(src[start:end])
 				if inSprintf {
-					appendSprintfLit(&sb, &d.Segs, raw, start, &phIdx, &d.Dynamic)
+					appendSprintfLit(&sb, &d.Segs, raw, start, &phIdx, &d.Dynamic, sprintfTables)
 				} else {
 					vs := sb.Len()
 					sb.WriteString(neutralize(raw))
@@ -129,7 +167,13 @@ func Extract(path string, src []byte, cat *indexer.Catalog) *FileInfo {
 			case *ast.CallExpr:
 				if isSprintf(x) && len(x.Args) > 0 {
 					d.Dynamic = true
+					prev := sprintfTables
+					sprintfTables = make([]string, 0, len(x.Args)-1)
+					for _, arg := range x.Args[1:] {
+						sprintfTables = append(sprintfTables, resolveSprintfArgTable(arg))
+					}
 					flat(x.Args[0], depth, true)
+					sprintfTables = prev
 				} else if tname := extractTableNameExpr(x, cat); tname != "" {
 					sb.WriteString(tname)
 				} else {
@@ -165,7 +209,7 @@ func Extract(path string, src []byte, cat *indexer.Catalog) *FileInfo {
 						break
 					}
 					if id, ok := lhs.(*ast.Ident); ok && isSQLVarName(id.Name) {
-						if d := build(x.Rhs[i], fn, nil); len(d.Segs) > 0 {
+						if d := build(x.Rhs[i], fn, nil); len(d.Segs) > 0 && (sqlish.MatchString(d.Text) || isStandaloneOrFragmentSQL(d.Text)) {
 							addDoc(d)
 						}
 					}
@@ -176,7 +220,7 @@ func Extract(path string, src []byte, cat *indexer.Catalog) *FileInfo {
 						break
 					}
 					if isSQLVarName(id.Name) {
-						if d := build(x.Values[i], fn, nil); len(d.Segs) > 0 {
+						if d := build(x.Values[i], fn, nil); len(d.Segs) > 0 && (sqlish.MatchString(d.Text) || isStandaloneOrFragmentSQL(d.Text)) {
 							addDoc(d)
 						}
 					}
@@ -191,14 +235,14 @@ func Extract(path string, src []byte, cat *indexer.Catalog) *FileInfo {
 				}
 			case *ast.CallExpr:
 				if isSprintf(x) && len(x.Args) > 0 {
-					if d := build(x, fn, nil); len(d.Segs) > 0 && sqlish.MatchString(d.Text) {
+					if d := build(x, fn, nil); len(d.Segs) > 0 && isStandaloneOrFragmentSQL(d.Text) {
 						addDoc(d)
 						return false
 					}
 				}
 			case *ast.BasicLit:
 				if x.Kind == token.STRING {
-					if d := build(x, fn, nil); sqlish.MatchString(d.Text) {
+					if d := build(x, fn, nil); isStandaloneOrFragmentSQL(d.Text) {
 						addDoc(d)
 					}
 				}
@@ -252,8 +296,15 @@ func extractTableNameExpr(e ast.Expr, cat *indexer.Catalog) string {
 }
 
 func anySQL(d *Doc, src []byte) bool {
+	if isStandaloneOrFragmentSQL(d.Text) {
+		return true
+	}
+	if len(d.VarRefs) > 0 && sqlish.MatchString(d.Text) {
+		return true
+	}
 	for _, s := range d.Segs {
-		if sqlish.MatchString(string(neutralize(string(src[s.GoStart:s.GoStart+s.VEnd-s.VStart]))) + " ") {
+		segText := string(neutralize(string(src[s.GoStart:s.GoStart+s.VEnd-s.VStart]))) + " "
+		if isStandaloneOrFragmentSQL(segText) {
 			return true
 		}
 	}
@@ -275,12 +326,15 @@ func isSQLVarName(name string) bool {
 }
 
 // appendSprintfLit neutralizes a fmt.Sprintf format string literal while replacing
-// %d/%s/%v format verbs with sequential $1..$N SQL placeholders and preserving Seg byte mapping.
-func appendSprintfLit(sb *strings.Builder, segs *[]Seg, raw string, goStart int, phIdx *int, dynamic *bool) {
+// %d/%s/%v format verbs with resolved table names, dynamic markers, or sequential $1..$N SQL placeholders,
+// preserving Seg byte mapping.
+func appendSprintfLit(sb *strings.Builder, segs *[]Seg, raw string, goStart int, phIdx *int, dynamic *bool, sprintfTables []string) {
 	neut := neutralize(raw)
 	n := len(raw)
 	segGoStart := goStart
 	segVStart := sb.Len()
+	hasExplicitDollarPh := strings.Contains(raw, "$1")
+	argIdx := 0
 
 	flushSeg := func(goEnd int) {
 		if sb.Len() > segVStart {
@@ -299,6 +353,8 @@ func appendSprintfLit(sb *strings.Builder, segs *[]Seg, raw string, goStart int,
 			}
 			if verb == 'd' || verb == 's' || verb == 'v' {
 				*dynamic = true
+				curArg := argIdx
+				argIdx++
 				if i > 0 && raw[i-1] == '$' {
 					// e.g. $%d -> already has '$' before it; emit placeholder digit(s)
 					ph := strconv.Itoa(*phIdx)
@@ -312,6 +368,20 @@ func appendSprintfLit(sb *strings.Builder, segs *[]Seg, raw string, goStart int,
 						segGoStart = goStart + i + 2
 						segVStart = sb.Len()
 					}
+					i++
+					continue
+				}
+				if curArg < len(sprintfTables) && sprintfTables[curArg] != "" {
+					flushSeg(goStart + i)
+					sb.WriteString(sprintfTables[curArg])
+					segGoStart = goStart + i + 2
+					segVStart = sb.Len()
+					i++
+					continue
+				}
+				if hasExplicitDollarPh && (verb == 's' || verb == 'v') {
+					// %s inside a query that already uses $1..$N is interpolating a dynamic table/column/fragment
+					sb.WriteString("__")
 					i++
 					continue
 				}

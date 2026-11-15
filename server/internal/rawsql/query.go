@@ -324,10 +324,10 @@ var (
 
 // Placeholders returns the number of arguments the query expects, or -1 if unknown.
 func (q *QueryCall) Placeholders() int {
-	if q.Doc.Dynamic || ddl.MatchString(q.Doc.Text) {
+	if q.Doc.Dynamic || isDDL(q.Doc.Text) {
 		return -1
 	}
-	t := strLit.ReplaceAllString(q.Doc.Text, "''")
+	t := maskStringLiterals(q.Doc.Text)
 	max := 0
 	for _, m := range numPh.FindAllStringSubmatch(t, -1) {
 		n := 0
