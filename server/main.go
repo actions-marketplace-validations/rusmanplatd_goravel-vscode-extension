@@ -11,7 +11,37 @@ import (
 
 var version = "0.7.1"
 
+func parseSQLSourceFlag(args []string, i int) (src indexer.SQLSource, nextIdx int, handled bool) {
+	arg := args[i]
+	switch {
+	case arg == "--live-db":
+		return indexer.SQLSourceLiveDB, i, true
+	case arg == "--sql-source":
+		if i+1 >= len(args) {
+			fmt.Fprintln(os.Stderr, "goravel-lsp: --sql-source requires a value (auto, model, live-db, both)")
+			os.Exit(2)
+		}
+		v, ok := indexer.ParseSQLSource(args[i+1])
+		if !ok {
+			fmt.Fprintf(os.Stderr, "goravel-lsp: invalid --sql-source %q (expected auto, model, live-db, or both)\n", args[i+1])
+			os.Exit(2)
+		}
+		return v, i + 1, true
+	case strings.HasPrefix(arg, "--sql-source="):
+		val := strings.TrimPrefix(arg, "--sql-source=")
+		v, ok := indexer.ParseSQLSource(val)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "goravel-lsp: invalid --sql-source %q (expected auto, model, live-db, or both)\n", val)
+			os.Exit(2)
+		}
+		return v, i, true
+	default:
+		return "", i, false
+	}
+}
+
 func main() {
+	sqlSource := indexer.SQLSourceAuto
 	if len(os.Args) > 1 {
 		cmd := os.Args[1]
 		switch cmd {
@@ -36,7 +66,14 @@ func main() {
 				Root:    ".",
 				OnlySQL: cmd == "--check-sql",
 			}
-			for _, arg := range os.Args[2:] {
+			args := os.Args[2:]
+			for i := 0; i < len(args); i++ {
+				if src, ni, ok := parseSQLSourceFlag(args, i); ok {
+					opts.SQLSource = src
+					i = ni
+					continue
+				}
+				arg := args[i]
 				switch {
 				case arg == "--only-sql" || arg == "--sql" || arg == "--check-sql":
 					opts.OnlySQL = true
@@ -53,9 +90,19 @@ func main() {
 				}
 			}
 			os.Exit(lsp.CheckWithOptions(opts))
+		default:
+			args := os.Args[1:]
+			for i := 0; i < len(args); i++ {
+				if src, ni, ok := parseSQLSourceFlag(args, i); ok {
+					sqlSource = src
+					i = ni
+				}
+			}
 		}
 	}
-	if err := lsp.New(os.Stdin, os.Stdout).Run(); err != nil {
+	srv := lsp.New(os.Stdin, os.Stdout)
+	srv.SetSQLSource(sqlSource)
+	if err := srv.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "goravel-lsp:", err)
 		os.Exit(1)
 	}

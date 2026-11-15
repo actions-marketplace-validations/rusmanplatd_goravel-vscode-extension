@@ -55,25 +55,35 @@ type LocationT struct {
 
 // Server is the language server state.
 type Server struct {
-	in    *bufio.Reader
-	out   io.Writer
-	wmu   sync.Mutex
-	root  string
-	roots []string
-	cat   *indexer.Catalog
-	cats  map[string]*indexer.Catalog
-	docs  map[string]string // uri -> text
-	exit  bool
+	in        *bufio.Reader
+	out       io.Writer
+	wmu       sync.Mutex
+	root      string
+	roots     []string
+	cat       *indexer.Catalog
+	cats      map[string]*indexer.Catalog
+	docs      map[string]string // uri -> text
+	sqlSource indexer.SQLSource
+	exit      bool
 }
 
 func New(r io.Reader, w io.Writer) *Server {
 	return &Server{
-		in:   bufio.NewReader(r),
-		out:  w,
-		cat:  indexer.NewCatalog(),
-		cats: map[string]*indexer.Catalog{},
-		docs: map[string]string{},
+		in:        bufio.NewReader(r),
+		out:       w,
+		cat:       indexer.NewCatalog(),
+		cats:      map[string]*indexer.Catalog{},
+		docs:      map[string]string{},
+		sqlSource: indexer.SQLSourceAuto,
 	}
+}
+
+// SetSQLSource sets the schema source used by the SQL checker ("auto", "model", "live-db", "both").
+func (s *Server) SetSQLSource(src indexer.SQLSource) {
+	if src == "" {
+		src = indexer.SQLSourceAuto
+	}
+	s.sqlSource = src
 }
 
 func (s *Server) Run() error {
@@ -145,12 +155,16 @@ func (s *Server) dispatch(m *message) {
 				URI string `json:"uri"`
 			} `json:"workspaceFolders"`
 			InitOpts struct {
-				LiveIntrospection bool `json:"liveIntrospection"`
+				LiveIntrospection bool   `json:"liveIntrospection"`
+				SQLSource         string `json:"sqlSource"`
 			} `json:"initializationOptions"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		if p.InitOpts.LiveIntrospection {
 			indexer.LiveDBEnabled = true
+		}
+		if src, ok := indexer.ParseSQLSource(p.InitOpts.SQLSource); ok && p.InitOpts.SQLSource != "" {
+			s.sqlSource = src
 		}
 		for _, f := range p.Folders {
 			s.addRoot(uriToPath(f.URI))
@@ -236,13 +250,23 @@ func (s *Server) dispatch(m *message) {
 			Settings map[string]any `json:"settings"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
+		changed := false
 		if enabled, ok := extractLiveIntrospectionSetting(p.Settings); ok {
 			if indexer.LiveDBEnabled != enabled {
 				indexer.LiveDBEnabled = enabled
-				s.reindex()
-				for uri := range s.docs {
-					s.diagnose(uri)
-				}
+				changed = true
+			}
+		}
+		if src, ok := extractSQLSourceSetting(p.Settings); ok {
+			if s.sqlSource != src {
+				s.sqlSource = src
+				changed = true
+			}
+		}
+		if changed {
+			s.reindex()
+			for uri := range s.docs {
+				s.diagnose(uri)
 			}
 		}
 	case "textDocument/didClose":
@@ -370,7 +394,10 @@ func (s *Server) reindex() {
 		s.cats = map[string]*indexer.Catalog{}
 	}
 	for _, r := range s.roots {
-		c := indexer.Build(r)
+		c := indexer.BuildWithOptions(r, indexer.BuildOptions{
+			LiveDB:    indexer.LiveDBEnabled,
+			SQLSource: s.sqlSource,
+		})
 		s.cats[r] = c
 		if r == s.root || s.cat == nil {
 			s.cat = c
@@ -387,7 +414,10 @@ func (s *Server) reindexPath(path string) {
 	if s.cats == nil {
 		s.cats = map[string]*indexer.Catalog{}
 	}
-	c := indexer.Build(r)
+	c := indexer.BuildWithOptions(r, indexer.BuildOptions{
+		LiveDB:    indexer.LiveDBEnabled,
+		SQLSource: s.sqlSource,
+	})
 	s.cats[r] = c
 	if r == s.root || s.cat == nil {
 		s.cat = c
@@ -629,6 +659,19 @@ func colDetail(t *indexer.Table, c *indexer.Column) string {
 	return typ
 }
 
+func schemaSourceLabel(fromModel, fromLiveDB bool) string {
+	switch {
+	case fromModel && fromLiveDB:
+		return "model, live-db"
+	case fromLiveDB:
+		return "live-db"
+	case fromModel:
+		return "model"
+	default:
+		return ""
+	}
+}
+
 func colMD(t *indexer.Table, c *indexer.Column) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**%s.%s**\n\n", t.Name, c.Name)
@@ -644,6 +687,9 @@ func colMD(t *indexer.Table, c *indexer.Column) string {
 	}
 	if c.ForeignKey != "" {
 		fmt.Fprintf(&b, "- FK: `%s`\n", c.ForeignKey)
+	}
+	if src := schemaSourceLabel(c.FromModel, c.FromLiveDB); src != "" {
+		fmt.Fprintf(&b, "- Source: `%s`\n", src)
 	}
 	if c.Doc != "" {
 		fmt.Fprintf(&b, "\n%s\n", c.Doc)
@@ -666,6 +712,9 @@ func tableMD(t *indexer.Table) string {
 	}
 	if t.Model != "" {
 		fmt.Fprintf(&b, " — `models.%s`", t.Model)
+	}
+	if src := schemaSourceLabel(t.FromModel, t.FromLiveDB); src != "" {
+		fmt.Fprintf(&b, "\n\n- Source: `%s`", src)
 	}
 	b.WriteString("\n\n| column | type |\n|---|---|\n")
 	for _, c := range t.Columns {
@@ -762,6 +811,10 @@ func (s *Server) hover(raw json.RawMessage) any {
 		md = fmt.Sprintf("**Table Alias `%s`** → %s", ref.TableAlias, tableMD(ref.Table))
 	default:
 		md = tableMD(ref.Table)
+	}
+	effSrc := indexer.ResolveSQLSource(s.sqlSource, indexer.LiveDBEnabled)
+	if md != "" {
+		md += fmt.Sprintf("\n_SQL checker source: `%s`_\n", effSrc)
 	}
 	res := map[string]any{"contents": map[string]any{"kind": "markdown", "value": md}}
 	if g1, ok1 := d.ToGo(ref.VStart); ok1 {
@@ -872,17 +925,18 @@ func (s *Server) diagnose(uri string) {
 	text := s.docs[uri]
 	path := uriToPath(uri)
 	cat := s.catalogForPath(path)
+	sqlCat := cat.ForSQL(s.sqlSource)
 	diags := []map[string]any{}
 	if strings.HasSuffix(uri, ".go") {
-		fi := rawsql.Extract(path, []byte(text), cat)
-		for _, d := range rawsql.Analyze(fi, cat) {
+		fi := rawsql.Extract(path, []byte(text), sqlCat)
+		for _, d := range rawsql.Analyze(fi, sqlCat) {
 			diags = append(diags, map[string]any{
 				"range":    Range{offsetToPos(text, d.Start), offsetToPos(text, d.End)},
 				"severity": d.Severity, "source": "goravel-sql", "message": d.Message,
 			})
 		}
-		fa := orm.AnalyzeFile(path, []byte(text), cat)
-		for _, d := range fa.Diagnostics(cat) {
+		fa := orm.AnalyzeFile(path, []byte(text), sqlCat)
+		for _, d := range fa.Diagnostics(sqlCat) {
 			diags = append(diags, map[string]any{
 				"range":    Range{offsetToPos(text, d.Start), offsetToPos(text, d.End)},
 				"severity": d.Severity, "source": "goravel", "message": d.Message,
@@ -1639,4 +1693,22 @@ func extractLiveIntrospectionSetting(settings map[string]any) (bool, bool) {
 		return v, true
 	}
 	return false, false
+}
+
+func extractSQLSourceSetting(settings map[string]any) (indexer.SQLSource, bool) {
+	if settings == nil {
+		return "", false
+	}
+	if g, ok := settings["goravel"].(map[string]any); ok {
+		settings = g
+	}
+	if sqlCfg, ok := settings["sql"].(map[string]any); ok {
+		if v, ok := sqlCfg["source"].(string); ok {
+			return indexer.ParseSQLSource(v)
+		}
+	}
+	if v, ok := settings["sqlSource"].(string); ok {
+		return indexer.ParseSQLSource(v)
+	}
+	return "", false
 }

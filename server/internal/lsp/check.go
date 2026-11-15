@@ -20,6 +20,7 @@ type CheckOptions struct {
 	ErrorsOnly bool
 	OutFormat  string // "text" | "github-actions"
 	SkipDirs   []string
+	SQLSource  indexer.SQLSource
 }
 
 // Check prints SQL and Goravel ORM/Config/Validation diagnostics for every Go file in a project (CLI: --check <root>).
@@ -59,7 +60,11 @@ func CheckWithOptions(opts CheckOptions) int {
 		}
 	}
 
-	cat := indexer.Build(root)
+	cat := indexer.BuildWithOptions(root, indexer.BuildOptions{
+		LiveDB:    indexer.LiveDBEnabled,
+		SQLSource: opts.SQLSource,
+	})
+	sqlCat := cat.ForSQL(opts.SQLSource)
 	issues, docs := 0, 0
 
 	emit := func(file string, line, col, sev int, msg string) {
@@ -93,21 +98,21 @@ func CheckWithOptions(opts CheckOptions) int {
 			return nil
 		}
 		src := string(b)
-		fi := rawsql.Extract(p, b, cat)
+		fi := rawsql.Extract(p, b, sqlCat)
 		docs += len(fi.Docs)
-		for _, dg := range rawsql.Analyze(fi, cat) {
+		for _, dg := range rawsql.Analyze(fi, sqlCat) {
 			if dg.Severity > maxSeverity {
 				continue
 			}
 			pos := offsetToPos(src, dg.Start)
 			emit(p, pos.Line+1, pos.Character+1, dg.Severity, dg.Message)
 		}
-		fa := orm.AnalyzeFile(p, b, cat)
+		fa := orm.AnalyzeFile(p, b, sqlCat)
 		var ormDiags []rawsql.Diag
 		if opts.OnlySQL {
-			ormDiags = fa.SQLDiagnostics(cat)
+			ormDiags = fa.SQLDiagnostics(sqlCat)
 		} else {
-			ormDiags = fa.Diagnostics(cat)
+			ormDiags = fa.Diagnostics(sqlCat)
 		}
 		for _, dg := range ormDiags {
 			if dg.Severity > maxSeverity {
@@ -133,7 +138,7 @@ func CheckWithOptions(opts CheckOptions) int {
 		return nil
 	})
 	fmt.Printf("%d sql docs, %d tables, %d routes, %d configs, %d rules, %d issues\n",
-		docs, len(cat.Tables), len(cat.Routes), len(cat.Configs), len(cat.Rules), issues)
+		docs, len(sqlCat.Tables), len(cat.Routes), len(cat.Configs), len(cat.Rules), issues)
 	if issues > 0 {
 		return 1
 	}

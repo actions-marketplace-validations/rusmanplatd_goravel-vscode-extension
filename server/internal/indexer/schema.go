@@ -29,6 +29,8 @@ type Column struct {
 	ForeignKey string   `json:"foreignKey,omitempty"` // target_table.target_col
 	Loc        Location `json:"loc"`                  // Go model field
 	MigLoc     Location `json:"migLoc"`               // migration column definition
+	FromModel  bool     `json:"-"`
+	FromLiveDB bool     `json:"-"`
 }
 
 // Relation describes a model relationship (BelongsTo, HasMany, HasOne, ManyToMany) or FK.
@@ -50,15 +52,17 @@ type IndexItem struct {
 
 // Table describes a table and the Go model backing it.
 type Table struct {
-	Name      string      `json:"name"`
-	Schema    string      `json:"schema,omitempty"`
-	Model     string      `json:"model"`
-	Columns   []*Column   `json:"columns"`
-	Relations []*Relation `json:"relations,omitempty"`
-	Indexes   []IndexItem `json:"indexes,omitempty"`
-	Loc       Location    `json:"loc"`    // Go struct
-	MigLoc    Location    `json:"migLoc"` // CREATE TABLE
-	byName    map[string]*Column
+	Name       string      `json:"name"`
+	Schema     string      `json:"schema,omitempty"`
+	Model      string      `json:"model"`
+	Columns    []*Column   `json:"columns"`
+	Relations  []*Relation `json:"relations,omitempty"`
+	Indexes    []IndexItem `json:"indexes,omitempty"`
+	Loc        Location    `json:"loc"`    // Go struct
+	MigLoc     Location    `json:"migLoc"` // CREATE TABLE
+	FromModel  bool        `json:"-"`
+	FromLiveDB bool        `json:"-"`
+	byName     map[string]*Column
 }
 
 // HasIndex reports whether col is the leading (or sole) column of an index or is "id".
@@ -110,10 +114,18 @@ func (t *Table) add(c *Column) {
 	}
 	key := strings.ToLower(c.Name)
 	if old, ok := t.byName[key]; ok {
+		if c.FromModel {
+			old.FromModel = true
+		}
+		if c.FromLiveDB {
+			old.FromLiveDB = true
+		}
 		if c.SQLType != "" {
 			old.SQLType = c.SQLType
 			old.Nullable = c.Nullable
-			old.MigLoc = c.MigLoc
+			if c.MigLoc.Valid() {
+				old.MigLoc = c.MigLoc
+			}
 		}
 		if c.ForeignKey != "" {
 			old.ForeignKey = c.ForeignKey
@@ -421,6 +433,7 @@ type DBFunction struct {
 type Catalog struct {
 	mu                 sync.RWMutex
 	Root               string
+	LiveDBConnected    bool
 	Tables             map[string]*Table                      // by table name (no schema)
 	Models             map[string]*Table                      // by Go model name
 	TableConsts        map[string]*TableConstInfo             // by constant identifier name
@@ -658,8 +671,114 @@ func (c *Catalog) ViewForPath(filePath string) *ViewItem {
 	return nil
 }
 
+// SQLSource controls which schema source is used by the SQL checker.
+type SQLSource string
+
+const (
+	SQLSourceAuto   SQLSource = "auto"
+	SQLSourceModel  SQLSource = "model"
+	SQLSourceLiveDB SQLSource = "live-db"
+	SQLSourceBoth   SQLSource = "both"
+)
+
+// BuildOptions configures project indexing in BuildWithOptions.
+type BuildOptions struct {
+	LiveDB    bool
+	SQLSource SQLSource
+}
+
+// ParseSQLSource parses a SQL checker source string ("auto", "model", "live-db", "both").
+func ParseSQLSource(s string) (SQLSource, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto":
+		return SQLSourceAuto, true
+	case "model", "models":
+		return SQLSourceModel, true
+	case "live-db", "livedb", "live", "db":
+		return SQLSourceLiveDB, true
+	case "both", "all", "merged":
+		return SQLSourceBoth, true
+	default:
+		return "", false
+	}
+}
+
+// ResolveSQLSource resolves SQLSourceAuto based on whether live DB introspection is enabled.
+func ResolveSQLSource(src SQLSource, liveDB bool) SQLSource {
+	switch src {
+	case SQLSourceModel, SQLSourceLiveDB, SQLSourceBoth:
+		return src
+	default:
+		if liveDB {
+			return SQLSourceBoth
+		}
+		return SQLSourceModel
+	}
+}
+
+func markModelSchema(c *Catalog) {
+	for _, t := range c.Tables {
+		t.FromModel = true
+		for _, col := range t.Columns {
+			col.FromModel = true
+		}
+	}
+}
+
+// ForSQL returns a Catalog view whose Tables/Models reflect the requested SQL checker source.
+func (c *Catalog) ForSQL(source SQLSource) *Catalog {
+	if c == nil {
+		return nil
+	}
+	eff := ResolveSQLSource(source, LiveDBEnabled)
+	if eff == SQLSourceBoth {
+		return c
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if eff == SQLSourceModel && !c.LiveDBConnected {
+		return c
+	}
+	wantLive := eff == SQLSourceLiveDB
+	clone := *c
+	clone.mu = sync.RWMutex{}
+	clone.Tables = make(map[string]*Table, len(c.Tables))
+	clone.Models = make(map[string]*Table, len(c.Models))
+	for k, t := range c.Tables {
+		if wantLive && !t.FromLiveDB {
+			continue
+		}
+		if !wantLive && !t.FromModel {
+			continue
+		}
+		nt := *t
+		nt.byName = nil
+		nt.Columns = make([]*Column, 0, len(t.Columns))
+		for _, col := range t.Columns {
+			if wantLive && !col.FromLiveDB {
+				continue
+			}
+			if !wantLive && !col.FromModel {
+				continue
+			}
+			nc := *col
+			nt.add(&nc)
+		}
+		clone.Tables[k] = &nt
+		if nt.Model != "" {
+			clone.Models[nt.Model] = &nt
+		}
+	}
+	return &clone
+}
+
 // Build indexes the project at root.
 func Build(root string) *Catalog {
+	return BuildWithOptions(root, BuildOptions{LiveDB: LiveDBEnabled, SQLSource: SQLSourceAuto})
+}
+
+// BuildWithOptions indexes the project at root with explicit build options.
+func BuildWithOptions(root string, opts BuildOptions) *Catalog {
 	c := NewCatalog()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -667,6 +786,7 @@ func Build(root string) *Catalog {
 	indexModels(c, root)
 	indexMigrations(c, root)
 	resolveModelRelations(c)
+	markModelSchema(c)
 	indexConfigs(c, root)
 	indexRoutes(c, root)
 	indexGrpcRoutes(c, root)
@@ -682,6 +802,9 @@ func Build(root string) *Catalog {
 	indexEventsAndJobs(c, root)
 	indexObserversAndScopes(c, root)
 	indexBootstrapRegistrations(c, root)
-	indexLiveDBIfEnabled(c, root)
+	liveDB := opts.LiveDB || LiveDBEnabled || opts.SQLSource == SQLSourceLiveDB || opts.SQLSource == SQLSourceBoth
+	if liveDB {
+		introspectLiveDBWithConfig(c, resolveDBConfigUnlocked(c))
+	}
 	return c
 }

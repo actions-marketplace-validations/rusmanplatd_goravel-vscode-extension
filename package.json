@@ -2,7 +2,7 @@
   "name": "goravel-vscode",
   "displayName": "Goravel",
   "description": "Goravel IDE tooling: Raw SQL LSP, ORM intelligence, Views & Templates (.tmpl/.gohtml), Config, Routes, Validation, Explorers, and Artisan CLI",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "publisher": "rusmanplatd",
   "repository": {
     "type": "git",
@@ -56,6 +56,23 @@
           "type": "boolean",
           "default": false,
           "description": "Enable optional live database schema introspection using .env DB_* settings."
+        },
+        "goravel.sql.source": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "model",
+            "live-db",
+            "both"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Use Go models and migrations by default, or merge with live database introspection when goravel.sql.liveIntrospection is enabled.",
+            "Use Go models and migrations in the workspace as the schema source for SQL checking.",
+            "Use live database introspection (via .env DB_* settings) as the schema source for SQL checking.",
+            "Merge Go models/migrations with live database introspection for SQL checking."
+          ],
+          "description": "Schema source used by the SQL checker."
         },
         "goravel.artisan.command": {
           "type": "string",

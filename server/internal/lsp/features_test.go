@@ -1195,3 +1195,83 @@ func Web() {
 		t.Errorf("expected no template diagnostics for shared.tmpl in second workspace root, got %+v", tDiags)
 	}
 }
+
+func TestSQLSourceConfigurationAndInitOptions(t *testing.T) {
+	srv := New(strings.NewReader(""), &bytes.Buffer{})
+	root := t.TempDir()
+
+	initParams, _ := json.Marshal(map[string]any{
+		"rootUri": pathToURI(root),
+		"initializationOptions": map[string]any{
+			"sqlSource": "model",
+		},
+	})
+	srv.dispatch(&message{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: initParams})
+	if srv.sqlSource != indexer.SQLSourceModel {
+		t.Fatalf("expected sqlSource=model after initialize, got %q", srv.sqlSource)
+	}
+
+	cfgParams, _ := json.Marshal(map[string]any{
+		"settings": map[string]any{
+			"goravel": map[string]any{
+				"sql": map[string]any{
+					"source": "live-db",
+				},
+			},
+		},
+	})
+	srv.dispatch(&message{JSONRPC: "2.0", Method: "workspace/didChangeConfiguration", Params: cfgParams})
+	if srv.sqlSource != indexer.SQLSourceLiveDB {
+		t.Fatalf("expected sqlSource=live-db after didChangeConfiguration, got %q", srv.sqlSource)
+	}
+}
+
+func TestSQLHoverIncludesSourceInfo(t *testing.T) {
+	tbl := &indexer.Table{
+		Name:       "users",
+		Model:      "User",
+		FromModel:  true,
+		FromLiveDB: false,
+	}
+	colModel := &indexer.Column{Name: "email", GoName: "Email", GoType: "string", FromModel: true}
+	colLive := &indexer.Column{Name: "legacy_flag", SQLType: "BOOLEAN", FromLiveDB: true}
+	colBoth := &indexer.Column{Name: "id", GoName: "ID", GoType: "uint", SQLType: "BIGINT", FromModel: true, FromLiveDB: true}
+
+	if md := colMD(tbl, colModel); !strings.Contains(md, "- Source: `model`") {
+		t.Errorf("expected model source in colMD, got:\n%s", md)
+	}
+	if md := colMD(tbl, colLive); !strings.Contains(md, "- Source: `live-db`") {
+		t.Errorf("expected live-db source in colMD, got:\n%s", md)
+	}
+	if md := colMD(tbl, colBoth); !strings.Contains(md, "- Source: `model, live-db`") {
+		t.Errorf("expected model, live-db source in colMD, got:\n%s", md)
+	}
+	if md := tableMD(tbl); !strings.Contains(md, "- Source: `model`") {
+		t.Errorf("expected model source in tableMD, got:\n%s", md)
+	}
+
+	srv := New(strings.NewReader(""), &bytes.Buffer{})
+	srv.SetSQLSource(indexer.SQLSourceModel)
+	cat := indexer.NewCatalog()
+	cat.Tables["users"] = tbl
+	tbl.Columns = []*indexer.Column{colModel}
+	srv.cat = cat
+
+	src := "package main\nfunc q() { _ = `SELECT email FROM users` }\n"
+	uri := "file:///tmp/main.go"
+	srv.docs[uri] = src
+	off := strings.Index(src, "email")
+	pos := offsetToPos(src, off)
+	params, _ := json.Marshal(map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     pos,
+	})
+	res, ok := srv.hover(params).(map[string]any)
+	if !ok {
+		t.Fatalf("expected hover result, got %T", res)
+	}
+	contents := res["contents"].(map[string]any)["value"].(string)
+	if !strings.Contains(contents, "_SQL checker source: `model`_") {
+		t.Errorf("expected SQL checker source in hover, got:\n%s", contents)
+	}
+}

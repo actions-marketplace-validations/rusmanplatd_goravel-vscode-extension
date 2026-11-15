@@ -67,7 +67,12 @@ func resolveDBConfigUnlocked(c *Catalog) dbConnConfig {
 	if c == nil {
 		return cfg
 	}
-	env := func(k string) string { return c.EnvVars[k] }
+	env := func(k string) string {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+		return c.EnvVars[k]
+	}
 	root := c.Root
 
 	cfg.Driver = strings.ToLower(env("DB_CONNECTION"))
@@ -245,11 +250,14 @@ func parseDelimitedColumns(c *Catalog, out, sep string) {
 		if tbl == "" || col == "" {
 			continue
 		}
+		c.LiveDBConnected = true
 		t := c.ensure(tbl)
+		t.FromLiveDB = true
 		t.add(&Column{
-			Name:     col,
-			SQLType:  strings.ToUpper(typ),
-			Nullable: strings.EqualFold(nul, "YES"),
+			Name:       col,
+			SQLType:    strings.ToUpper(typ),
+			Nullable:   strings.EqualFold(nul, "YES"),
+			FromLiveDB: true,
 		})
 	}
 }

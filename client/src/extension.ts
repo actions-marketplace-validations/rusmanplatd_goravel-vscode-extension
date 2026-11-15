@@ -89,6 +89,7 @@ async function start(ctx: vscode.ExtensionContext) {
     ],
     initializationOptions: {
       liveIntrospection: cfg.get<boolean>("sql.liveIntrospection", false),
+      sqlSource: cfg.get<string>("sql.source", "auto"),
     },
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher(
@@ -162,13 +163,18 @@ export async function activate(ctx: vscode.ExtensionContext) {
 
   ctx.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("goravel.sql.liveIntrospection") && client) {
+      if (
+        (e.affectsConfiguration("goravel.sql.liveIntrospection") ||
+          e.affectsConfiguration("goravel.sql.source")) &&
+        client
+      ) {
         const updated = vscode.workspace.getConfiguration("goravel");
         client.sendNotification("workspace/didChangeConfiguration", {
           settings: {
             goravel: {
               sql: {
                 liveIntrospection: updated.get<boolean>("sql.liveIntrospection", false),
+                source: updated.get<string>("sql.source", "auto"),
               },
             },
           },

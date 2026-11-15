@@ -60,6 +60,8 @@ Available CLI flags for `run` / `check` / `--check` / `--check-sql`:
 - `--only-sql` / `--sql` / `--check-sql` — Check only SQL and ORM database queries
 - `--all` — Run all diagnostics
 - `--errors-only` — Report errors only
+- `--sql-source=<auto|model|live-db|both>` — Schema source for the SQL checker (`model` = Go models/migrations, `live-db` = live DB introspection via `.env` `DB_*`, `both` = merged, `auto` = follows `GORAVEL_LIVE_DB=1`)
+- `--live-db` — Shorthand for `--sql-source=live-db`
 - `--out-format=github-actions` — Format output for GitHub Actions annotations
 - `--skip-dirs=dir1,dir2` — Comma-separated directories to skip
 
@@ -171,8 +173,11 @@ Inspect your indexed Goravel project or run static checks locally:
 # Print indexed tables, columns, relations, routes, configs, rules, and migrations
 goravel-lsp --dump .
 
-# Check only SQL and ORM queries
-goravel-lsp --check-sql .
+# Check only SQL and ORM queries (using Go models & migrations)
+goravel-lsp --check-sql --sql-source=model .
+
+# Check SQL queries against live database introspection (.env DB_* settings)
+goravel-lsp --check-sql --sql-source=live-db .
 
 # Check everything (SQL, ORM, routes, configs, views) and report errors only
 goravel-lsp check --all --errors-only .
@@ -183,7 +188,9 @@ goravel-lsp --check-sql --skip-dirs=vendor,testdata .
 
 ### 6. GitHub Actions CI Workflow
 
-Create `.github/workflows/goravel-lint.yml` to run `goravel-lsp` on every push and pull request:
+Create `.github/workflows/goravel-lint.yml` to run `goravel-lsp` on every push and pull request.
+
+By default (`--sql-source=model` / `auto`), `goravel-lsp` validates SQL against your Go models and migrations with no database connection required:
 
 ```yaml
 name: Goravel SQL & ORM Lint
@@ -203,7 +210,18 @@ jobs:
         with:
           version: "v0.8.1"
           working-directory: "."
-          args: "--check-sql --errors-only"
+          args: "--check-sql --errors-only --sql-source=model"
+          only-sql: "true"
+```
+
+If your CI job runs a database service container (e.g., PostgreSQL/MySQL) with migrations applied and `.env` `DB_*` configured, pass `--sql-source=live-db` (or `--live-db`) to validate queries directly against the live database schema:
+
+```yaml
+      - uses: rusmanplatd/goravel-vscode-extension@v0.8.1
+        with:
+          version: "v0.8.1"
+          working-directory: "."
+          args: "--check-sql --errors-only --sql-source=live-db"
           only-sql: "true"
 ```
 
@@ -225,6 +243,7 @@ If your Goravel app runs inside Docker, configure `goravel.artisan.command` in `
 | `goravel.server.path` | `""` | Path to the `goravel-lsp` binary. Defaults to the bundled `bin/goravel-lsp`. |
 | `goravel.sql.enable` | `true` | Enable Goravel Raw SQL and Framework intelligence inside Go files. |
 | `goravel.sql.liveIntrospection` | `false` | Enable optional live database schema introspection using `.env` `DB_*` settings. |
+| `goravel.sql.source` | `"auto"` | Schema source for the SQL checker: `"auto"` (follows `liveIntrospection`), `"model"` (Go models/migrations), `"live-db"` (live DB introspection), or `"both"` (merged). |
 | `goravel.artisan.command` | `"go run . artisan"` | Base Artisan CLI command prefix (e.g. `go run . artisan`, `./artisan`, or `docker compose exec app go run . artisan`). |
 
 ## Development
