@@ -295,7 +295,7 @@ func (d *Doc) CheckWithCatalog(sc Scope, cat *indexer.Catalog) []Issue {
 	}
 
 	if !hasUnknownTable && len(sc.Tables()) > 0 {
-		out = append(out, checkUnqualifiedColumns(d.Text, sc)...)
+		out = append(out, checkUnqualifiedColumns(d.Text, sc, cat)...)
 	}
 
 	return out
@@ -654,13 +654,27 @@ func matchParen(s string, openIdx int) int {
 	return -1
 }
 
+type cteSpan struct {
+	name      string
+	bodyStart int
+	bodyEnd   int
+	tbl       *indexer.Table
+}
+
 func extractCTEs(sql string, parent Scope, cat *indexer.Catalog) map[string]*indexer.Table {
+	out, _, _ := extractCTESpans(sql, parent, cat)
+	return out
+}
+
+func extractCTESpans(sql string, parent Scope, cat *indexer.Catalog) (map[string]*indexer.Table, []cteSpan, int) {
 	out := map[string]*indexer.Table{}
+	var spans []cteSpan
 	wm := withStartRe.FindStringIndex(sql)
 	if wm == nil {
-		return out
+		return out, nil, 0
 	}
 	pos := wm[1]
+	mainStart := 0
 	for pos < len(sql) {
 		cm := cteItemRe.FindStringSubmatchIndex(sql[pos:])
 		if cm == nil {
@@ -675,14 +689,21 @@ func extractCTEs(sql string, parent Scope, cat *indexer.Catalog) map[string]*ind
 		body := sql[openParen+1 : closeParen]
 		tbl := buildVirtualTable(name, "CTE "+name, body, parent, out, cat)
 		out[strings.ToLower(name)] = tbl
+		spans = append(spans, cteSpan{
+			name:      name,
+			bodyStart: openParen + 1,
+			bodyEnd:   closeParen,
+			tbl:       tbl,
+		})
 		pos = closeParen + 1
+		mainStart = pos
 		rest := strings.TrimLeft(sql[pos:], " \t\r\n")
 		if !strings.HasPrefix(rest, ",") {
 			break
 		}
 		pos = len(sql) - len(rest) + 1
 	}
-	return out
+	return out, spans, mainStart
 }
 
 func extractSubqueries(sql string, parent Scope, cat *indexer.Catalog) map[string]*indexer.Table {

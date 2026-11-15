@@ -11,6 +11,7 @@ import (
 	"github.com/rusmanplatd/goravel-lsp/internal/framework"
 	"github.com/rusmanplatd/goravel-lsp/internal/indexer"
 	"github.com/rusmanplatd/goravel-lsp/internal/orm"
+	"github.com/rusmanplatd/goravel-lsp/internal/rawsql"
 )
 
 func writeTempFile(t *testing.T, root, rel, content string) string {
@@ -944,6 +945,9 @@ func (c *ProfileController) Show(ctx http.Context) http.Response {
 	for _, d := range sDiags {
 		if strings.Contains(d.Message, "supabaseUrl") && strings.Contains(d.Message, "supabase_url") {
 			hasFuzzyDiag = true
+			if d.Severity != 1 {
+				t.Errorf("expected Severity 1 (Error) for unknown template variable, got %d", d.Severity)
+			}
 		}
 		if strings.Contains(d.Message, "/css/missing.css") {
 			hasMissingAssetDiag = true
@@ -996,14 +1000,26 @@ func (c *ProfileController) Show(ctx http.Context) http.Response {
 		t.Errorf("expected document symbols for define, template, and with in signin.tmpl, got %+v", syms)
 	}
 
-	// Verify TemplateHover on unreferenced view variables ({{.supabaseUrl}}, {{.supabaseAnonKey}}) and leading dot
+	// Verify TemplateHover & TemplateDiagnostics on unreferenced view variables ({{.supabaseUrl}}, {{.supabaseAnonKey}}, {{.unknownVariable}})
 	chatSrc := `{{ define "chat/index.tmpl" }}
 {{template "layouts/header.tmpl" .}}
 <meta name="supabase-url" content="{{.supabaseUrl}}">
 <meta name="supabase-key" content="{{.supabaseAnonKey}}">
+<meta name="unknown-variable" content="{{.unknownVariable}}">
 {{ end }}`
 	chatPath := writeTempFile(t, root, "resources/views/chat/index.tmpl", chatSrc)
 	cat = indexer.Build(root)
+
+	chatDiags := framework.TemplateDiagnostics(chatPath, chatSrc, cat)
+	hasUnknownVarErr := false
+	for _, d := range chatDiags {
+		if strings.Contains(d.Message, "unknownVariable") && d.Severity == 1 {
+			hasUnknownVarErr = true
+		}
+	}
+	if !hasUnknownVarErr {
+		t.Errorf("expected Severity 1 (Error) diagnostic for .unknownVariable in unreferenced view, got %+v", chatDiags)
+	}
 
 	supaIdx := strings.Index(chatSrc, "supabaseUrl")
 	hovSupa := framework.TemplateHover(chatPath, chatSrc, cat, supaIdx)
@@ -1068,5 +1084,76 @@ func FindBroken() error {
 `)
 	if code := CheckSQL(root); code == 0 {
 		t.Fatalf("expected CheckSQL to fail with non-zero exit code on broken SQL, got 0")
+	}
+}
+
+func TestCTEUnknownColumnError(t *testing.T) {
+	root := t.TempDir()
+	writeTempFile(t, root, "app/models/sys_permission.go", `package models
+type SysPermission struct {
+	ID        string `+"`gorm:\"column:id\"`"+`
+	Name      string `+"`gorm:\"column:name\"`"+`
+	CreatedAt string `+"`gorm:\"column:created_at\"`"+`
+}
+func (SysPermission) TableName() string { return "sys_permissions" }
+`)
+	repoPath := writeTempFile(t, root, "app/repositories/perm_repo.go", `package repositories
+import "goravel/app/models"
+func GetPerms() string {
+	permTable := (models.SysPermission{}).TableName()
+	query := `+"`"+`
+		WITH base_perms AS (
+			SELECT sp.id as perm_id, sp.name, sp.created_at
+			FROM `+"`"+` + permTable + `+"`"+` sp
+		),
+		agg_perms AS (
+			SELECT
+				perm_id,
+				json_agg(
+					json_build_object(
+						'id', perm_id,
+						'name', name,
+						'unknown_column', unknown_column
+					) ORDER BY created_at DESC
+				) as items
+			FROM base_perms
+			GROUP BY perm_id
+		),
+		direct_perms AS (
+			SELECT
+				json_agg(
+					json_build_object(
+						'unknown_column', sp.unknown_column,
+						'id', sp.id
+					)
+				) as items
+			FROM `+"`"+` + permTable + `+"`"+` sp
+		)
+		SELECT * FROM agg_perms
+	`+"`"+`
+	return query
+}
+`)
+	cat := indexer.Build(root)
+	src, err := os.ReadFile(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi := rawsql.Extract(repoPath, src, cat)
+	diags := rawsql.Analyze(fi, cat)
+	var unqualErr, qualErr bool
+	for _, d := range diags {
+		if d.Severity != 1 {
+			t.Errorf("expected Severity 1 (Error) for unknown SQL column, got %+v", d)
+		}
+		if strings.Contains(d.Message, "Column 'unknown_column' does not exist on table(s) in scope") {
+			unqualErr = true
+		}
+		if strings.Contains(d.Message, "Column 'unknown_column' does not exist on table 'sys_permissions'") {
+			qualErr = true
+		}
+	}
+	if !unqualErr || !qualErr {
+		t.Errorf("expected both unqualified CTE and qualified unknown_column errors (unqual=%v, qual=%v), got %+v", unqualErr, qualErr, diags)
 	}
 }

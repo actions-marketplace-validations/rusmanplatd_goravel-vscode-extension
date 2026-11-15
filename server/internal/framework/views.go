@@ -2277,8 +2277,8 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 			diags = append(diags, checkTemplateActionFuncs(body, bodyStart, cat)...)
 		}
 
-		// Check unpassed top-level .var references when callers are known
-		if hasKnownCallers {
+		// Check unpassed top-level .var references
+		if cat != nil {
 			dotRebound := false
 			for _, sb := range stack {
 				if sb.rebindsDot {
@@ -2298,14 +2298,23 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 					vName := src[vStart:vEnd]
 					if !knownVars[vName] && !reportedVars[vName] {
 						reportedVars[vName] = true
-						msg := fmt.Sprintf("Template variable '.%s' is not passed by callers of '%s'", vName, vi.Name)
+						viewName := filepath.Base(path)
+						if vi != nil && vi.Name != "" {
+							viewName = vi.Name
+						}
+						var msg string
+						if hasKnownCallers {
+							msg = fmt.Sprintf("Template variable '.%s' is not passed by callers of '%s'", vName, viewName)
+						} else {
+							msg = fmt.Sprintf("Unknown template variable '.%s' in '%s' (no callers pass this variable)", vName, viewName)
+						}
 						if best := closestVarMatch(vName, knownVarList); best != "" {
-							msg = fmt.Sprintf("Template variable '.%s' is not passed to '%s' (did you mean '.%s'?)", vName, vi.Name, best)
+							msg = fmt.Sprintf("Template variable '.%s' is not passed to '%s' (did you mean '.%s'?)", vName, viewName, best)
 						}
 						diags = append(diags, Diag{
 							Start:    vStart - 1,
 							End:      vEnd,
-							Severity: 4, // Hint
+							Severity: 1, // Error
 							Message:  msg,
 						})
 					}
