@@ -46,7 +46,7 @@ function getArtisanPrefix(): string {
 function shellQuote(arg: string): string {
   if (/^[A-Za-z0-9_.:/@=-]+$/.test(arg)) return arg;
   if (process.platform === "win32") {
-    return `"${arg.replace(/"/g, '\\"')}"`;
+    return `"${arg.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   }
   return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
