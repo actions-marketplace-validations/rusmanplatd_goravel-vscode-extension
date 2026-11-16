@@ -35,6 +35,7 @@ const (
 	SpanRequestInput                // ctx.Request().Input("name"), Query("page")
 	SpanLangKey                     // facades.Lang(ctx).Get("messages.welcome")
 	SpanGateAbility                 // facades.Gate().Allows("update-post")
+	SpanORMTable                    // facades.DB().Table("ref_geo_cities")
 )
 
 // Span represents a string literal in a Go file with Goravel framework semantics.
@@ -280,6 +281,14 @@ func AnalyzeFile(path string, src []byte, cat *indexer.Catalog) *FileAnalysis {
 				return true
 			}
 			mname := sel.Sel.Name
+
+			// facades.DB().Table("name") / Query().Table("name"): hoverable table literal
+			if mname == "Table" && len(call.Args) == 1 {
+				if bl, ok := call.Args[0].(*ast.BasicLit); ok && bl.Kind == token.STRING {
+					tn, _ := parseTableAndAlias(strings.Trim(bl.Value, "\"`"))
+					addLitSpan(fa, off, bl, SpanORMTable, 0, cat.Table(indexer.StripSchema(tn)), nil)
+				}
+			}
 
 			// Check facades.Config().Get*("...") and config.Env("...")
 			if cfgGetMethods[mname] && len(call.Args) >= 1 && isConfigReceiver(sel.X) {
@@ -1134,6 +1143,11 @@ func (fa *FileAnalysis) Hover(goOff int, cat *indexer.Catalog) (md string, start
 			return langDocMD(sp.Text, locales), sp.Start, sp.End, true
 		}
 
+	case SpanORMTable:
+		if sp.Table != nil {
+			return tableDocMD(sp.Table), sp.Start, sp.End, true
+		}
+
 	case SpanGateAbility:
 		if gi, exists := cat.Gates[sp.Text]; exists && gi != nil {
 			return fmt.Sprintf("**Gate Ability `%s`**\n\n- Defined at `%s:%d`", gi.Ability, gi.Loc.File, gi.Loc.Line+1), sp.Start, sp.End, true
@@ -1753,6 +1767,29 @@ func colDocMD(t *indexer.Table, c *indexer.Column) string {
 	}
 	if c.Doc != "" {
 		fmt.Fprintf(&b, "\n%s\n", c.Doc)
+	}
+	return b.String()
+}
+
+func tableDocMD(t *indexer.Table) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Table `%s`**\n\n", t.Name)
+	if t.Model != "" {
+		fmt.Fprintf(&b, "- Model: `models.%s`\n", t.Model)
+	}
+	if t.Schema != "" {
+		fmt.Fprintf(&b, "- Schema: `%s`\n", t.Schema)
+	}
+	fmt.Fprintf(&b, "- Columns: %d\n", len(t.Columns))
+	max := len(t.Columns)
+	if max > 12 {
+		max = 12
+	}
+	for _, c := range t.Columns[:max] {
+		fmt.Fprintf(&b, "  - `%s` %s\n", c.Name, colTypeDetail(c))
+	}
+	if len(t.Columns) > max {
+		fmt.Fprintf(&b, "  - … %d more\n", len(t.Columns)-max)
 	}
 	return b.String()
 }

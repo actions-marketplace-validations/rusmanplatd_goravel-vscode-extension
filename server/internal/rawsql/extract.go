@@ -67,8 +67,15 @@ var (
 		`)`)
 )
 
+// proseFromRe matches "SELECT ... FROM <article/pronoun>" which is English prose
+// (e.g. "select a thing from the menu"), not SQL.
+var proseFromRe = regexp.MustCompile(`(?is)^\s*SELECT\b[^;]*?\bFROM\s+(?:the|a|an|this|that|these|those|my|your|our|its|his|her|their|some|any|each|every)\b`)
+
 func isStandaloneOrFragmentSQL(text string) bool {
 	clean := maskSQLComments(text)
+	if proseFromRe.MatchString(clean) {
+		return false
+	}
 	return standaloneSQLRe.MatchString(clean) || clauseFragmentSQLRe.MatchString(clean)
 }
 
