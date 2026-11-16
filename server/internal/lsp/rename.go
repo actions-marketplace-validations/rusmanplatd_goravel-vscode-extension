@@ -108,10 +108,24 @@ func (s *Server) rename(raw json.RawMessage) any {
 						}
 					}
 					for _, r := range d.Refs(sc) {
-						if strings.EqualFold(r.TableAlias, ref.TableAlias) && r.Column == nil {
+						if !strings.EqualFold(r.TableAlias, ref.TableAlias) {
+							continue
+						}
+						if r.Column == nil {
 							if g1, ok1 := d.ToGo(r.VStart); ok1 {
 								if g2, ok2 := d.ToGo(r.VEnd); ok2 {
 									addEdit(uri, text, g1, g2, newName)
+								}
+							}
+						} else if r.VStart > len(ref.TableAlias)+1 {
+							// Update the alias prefix in qualified column references like `u.id`
+							aliasStart := r.VStart - len(ref.TableAlias) - 1
+							aliasEnd := r.VStart - 1
+							if aliasStart >= 0 && aliasEnd < len(d.Text) && d.Text[aliasEnd] == '.' && strings.EqualFold(d.Text[aliasStart:aliasEnd], ref.TableAlias) {
+								if g1, ok1 := d.ToGo(aliasStart); ok1 {
+									if g2, ok2 := d.ToGo(aliasEnd); ok2 {
+										addEdit(uri, text, g1, g2, newName)
+									}
 								}
 							}
 						}

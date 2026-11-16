@@ -210,23 +210,65 @@ func isDBOrOrmReceiver(e ast.Expr) bool {
 }
 
 var (
+	withPrefixRe = regexp.MustCompile(`(?i)^\s*WITH(?:\s+RECURSIVE)?\b`)
 	selectRe     = regexp.MustCompile(`(?i)^\s*SELECT\b(\s+DISTINCT\b)?`)
 	itemRe       = regexp.MustCompile(`(?is)^(?:(\w+)\.)?(\w+)(?:\s+(?:AS\s+)?"?(\w+)"?)?$`)
 	asRe         = regexp.MustCompile(`(?is)\sAS\s+"?(\w+)"?$`)
 	implicitAsRe = regexp.MustCompile(`(?is)\)\s+"?([A-Za-z_]\w*)"?$`)
 )
 
-// ParseSelectList extracts output columns from a top-level SELECT.
+// ParseSelectList extracts output columns from a top-level SELECT (including after leading WITH CTEs).
 func ParseSelectList(text string) (cols []OutCol, star bool) {
-	m := selectRe.FindStringIndex(text)
+	selectStart := 0
+	if wt := withPrefixRe.FindStringIndex(text); wt != nil {
+		// Walk past CTE definitions: WITH [RECURSIVE] name [(cols)] AS (...), ... SELECT ...
+		i := wt[1]
+		depth := 0
+		inStr := false
+		for i < len(text) {
+			c := text[i]
+			if inStr {
+				if c == '\'' {
+					if i+1 < len(text) && text[i+1] == '\'' {
+						i++
+					} else {
+						inStr = false
+					}
+				}
+				i++
+				continue
+			}
+			switch c {
+			case '\'':
+				inStr = true
+			case '(':
+				depth++
+			case ')':
+				if depth > 0 {
+					depth--
+				}
+			}
+			if depth == 0 && (c == 'S' || c == 's') && i+6 <= len(text) && strings.EqualFold(text[i:i+6], "SELECT") &&
+				(i == 0 || !isWord(text[i-1])) && (i+6 == len(text) || !isWord(text[i+6])) {
+				selectStart = i
+				break
+			}
+			i++
+		}
+		if selectStart == 0 {
+			return nil, false
+		}
+	}
+	selectText := text[selectStart:]
+	m := selectRe.FindStringIndex(selectText)
 	if m == nil {
 		return nil, false
 	}
 	depth, start, inStr := 0, m[1], false
 	var items [][2]int
 	i := start
-	for ; i < len(text); i++ {
-		c := text[i]
+	for ; i < len(selectText); i++ {
+		c := selectText[i]
 		if inStr {
 			if c == '\'' {
 				inStr = false
@@ -246,16 +288,16 @@ func ParseSelectList(text string) (cols []OutCol, star bool) {
 				start = i + 1
 			}
 		}
-		if depth == 0 && (c == 'F' || c == 'f') && i+4 <= len(text) && strings.EqualFold(text[i:i+4], "FROM") &&
-			(i == 0 || !isWord(text[i-1])) && (i+4 == len(text) || !isWord(text[i+4])) {
+		if depth == 0 && (c == 'F' || c == 'f') && i+4 <= len(selectText) && strings.EqualFold(selectText[i:i+4], "FROM") &&
+			(i == 0 || !isWord(selectText[i-1])) && (i+4 == len(selectText) || !isWord(selectText[i+4])) {
 			break
 		}
 	}
 	items = append(items, [2]int{start, i})
 	for _, it := range items {
-		raw := text[it[0]:it[1]]
+		raw := selectText[it[0]:it[1]]
 		trim := strings.TrimSpace(raw)
-		lead := it[0] + strings.Index(raw, trim)
+		lead := selectStart + it[0] + strings.Index(raw, trim)
 		if trim == "" {
 			continue
 		}

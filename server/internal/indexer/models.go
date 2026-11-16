@@ -241,7 +241,7 @@ func addFields(t *Table, pf *parsedFile, f *ast.Field) {
 		}
 	}
 	gormTag := tag.Get("gorm")
-	if gormTag == "-" {
+	if gormTag == "-" || strings.Contains(gormTag, "-:all") || strings.Contains(gormTag, "-:migration") {
 		return
 	}
 	fk, refs := parseGormRelTags(gormTag)
@@ -364,6 +364,10 @@ func resolveModelRelations(c *Catalog) {
 					References:  refs,
 					Loc:         sf.Loc,
 				})
+				// Remove implicit relation field if it was optimistically added as a model-only column
+				if col := t.Column(sf.Col); col != nil && !col.MigLoc.Valid() && col.GoName == sf.GoName {
+					t.removeColumn(col.Name)
+				}
 			}
 		}
 		for _, r := range t.Relations {

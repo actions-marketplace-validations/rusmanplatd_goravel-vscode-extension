@@ -91,6 +91,11 @@ var (
 		"now": true, "count": true, "sum": true, "avg": true, "min": true, "max": true, "coalesce": true,
 		"lower": true, "upper": true, "date": true, "extract": true, "cast": true,
 		"join": true, "inner": true, "left": true, "right": true, "outer": true, "cross": true, "on": true,
+		"case": true, "when": true, "then": true, "else": true, "end": true, "distinct": true,
+		"any": true, "all": true, "some": true, "nulls": true, "first": true, "last": true,
+		"text": true, "varchar": true, "char": true, "int": true, "integer": true, "bigint": true,
+		"smallint": true, "boolean": true, "bool": true, "uuid": true, "json": true, "jsonb": true,
+		"timestamp": true, "timestamptz": true, "interval": true, "numeric": true, "float": true, "double": true,
 	}
 )
 
@@ -1320,16 +1325,27 @@ func (fa *FileAnalysis) diagnosticsFiltered(cat *indexer.Catalog, onlySQL bool) 
 			if sp.Table == nil {
 				continue
 			}
-			fields := strings.Fields(sp.Text)
-			if len(fields) > 0 {
-				col := fields[0]
-				if i := strings.LastIndexByte(col, '.'); i >= 0 {
-					col = col[i+1:]
+			for _, part := range strings.Split(sp.Text, ",") {
+				fields := strings.Fields(part)
+				if len(fields) == 0 {
+					continue
 				}
-				if !strings.Contains(col, "(") && sp.Table.Column(col) == nil {
+				rawCol := fields[0]
+				targetTable := sp.Table
+				col := rawCol
+				if i := strings.LastIndexByte(rawCol, '.'); i >= 0 {
+					qual := rawCol[:i]
+					col = rawCol[i+1:]
+					if qt := sp.resolveTable(qual); qt != nil {
+						targetTable = qt
+					} else {
+						continue
+					}
+				}
+				if col != "" && !strings.Contains(col, "(") && targetTable.Column(col) == nil {
 					out = append(out, rawsql.Diag{
-						Start: sp.Start, End: sp.Start + len(fields[0]), Severity: 1,
-						Message: fmt.Sprintf("Column '%s' does not exist on table '%s'", col, sp.Table.Name),
+						Start: sp.Start, End: sp.End, Severity: 1,
+						Message: fmt.Sprintf("Column '%s' does not exist on table '%s'", col, targetTable.Name),
 					})
 				}
 			}
@@ -1614,12 +1630,31 @@ func langDocMD(key string, locales map[string]indexer.TranslationEntry) string {
 func strMask(s string) string {
 	b := []byte(s)
 	inStr := false
-	for i := range b {
+	for i := 0; i < len(b); i++ {
+		if inStr {
+			if b[i] == '\'' {
+				if i+1 < len(b) && b[i+1] == '\'' {
+					b[i], b[i+1] = ' ', ' '
+					i++
+					continue
+				}
+				inStr = false
+			}
+			b[i] = ' '
+			continue
+		}
 		if b[i] == '\'' {
-			inStr = !inStr
+			inStr = true
 			b[i] = ' '
-		} else if inStr {
-			b[i] = ' '
+		} else if b[i] == ':' && i+1 < len(b) && b[i+1] == ':' {
+			// Mask PostgreSQL ::type casts so type names aren't flagged as missing columns
+			b[i], b[i+1] = ' ', ' '
+			i += 2
+			for i < len(b) && ((b[i] >= 'a' && b[i] <= 'z') || (b[i] >= 'A' && b[i] <= 'Z') || (b[i] >= '0' && b[i] <= '9') || b[i] == '_' || b[i] == '[' || b[i] == ']') {
+				b[i] = ' '
+				i++
+			}
+			i--
 		}
 	}
 	return string(b)

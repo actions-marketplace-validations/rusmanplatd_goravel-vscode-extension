@@ -39,3 +39,47 @@ func TestCompletionEscapedStringBounds(t *testing.T) {
 		fa.Completion(off, cat)
 	}
 }
+
+func TestStrMaskAndOrderDiagnostics(t *testing.T) {
+	masked := strMask(`meta::jsonb ->> 'key' = 'val''ue'`)
+	if masked == "" {
+		t.Fatal("expected non-empty masked string")
+	}
+	for _, tok := range []string{"jsonb", "key", "val", "ue"} {
+		if containsWord(masked, tok) {
+			t.Fatalf("expected %q to be masked in %q", tok, masked)
+		}
+	}
+
+	cat := indexer.NewCatalog()
+	tbl := &indexer.Table{
+		Name: "users",
+		Columns: []*indexer.Column{
+			{Name: "created_at", SQLType: "TIMESTAMP"},
+			{Name: "id", SQLType: "BIGINT"},
+		},
+	}
+	fa := &FileAnalysis{
+		Spans: []*Span{
+			{
+				Kind:  SpanORMOrder,
+				Start: 0,
+				End:   20,
+				Text:  "created_at DESC, id ASC",
+				Table: tbl,
+			},
+		},
+	}
+	if diags := fa.Diagnostics(cat); len(diags) != 0 {
+		t.Fatalf("expected 0 diagnostics for valid multi-column Order, got %+v", diags)
+	}
+}
+
+func containsWord(s, w string) bool {
+	for _, f := range identRe.FindAllString(s, -1) {
+		if f == w {
+			return true
+		}
+	}
+	return false
+}

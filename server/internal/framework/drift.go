@@ -59,7 +59,7 @@ func DriftDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 			for _, col := range t.Columns {
 				if col.MigLoc.Valid() && !col.Loc.Valid() {
 					missingInModel = append(missingInModel, col.Name)
-				} else if col.Loc.Valid() && !col.MigLoc.Valid() && !isStandardTimestampOrID(col.Name) {
+				} else if col.Loc.Valid() && !col.MigLoc.Valid() && !isStandardTimestampOrID(col.Name) && filepath.Clean(col.Loc.File) == clean {
 					off := lineColToOffset(src, col.Loc.Line, col.Loc.Col)
 					end := off + len(col.GoName)
 					if end > len(src) {
@@ -142,7 +142,7 @@ func DriftCodeActions(path, src string, cat *indexer.Catalog, goOff int) []CodeA
 					goName := pascalCase(col.Name)
 					goType := goTypeFromSQL(col.SQLType, col.Nullable)
 					lines = append(lines, fmt.Sprintf("\t%s %s `gorm:\"column:%s\" json:\"%s\"`", goName, goType, col.Name, col.Name))
-				} else if col.Loc.Valid() && !col.MigLoc.Valid() && !isStandardTimestampOrID(col.Name) {
+				} else if col.Loc.Valid() && !col.MigLoc.Valid() && !isStandardTimestampOrID(col.Name) && filepath.Clean(col.Loc.File) == clean {
 					missingInMig = append(missingInMig, col)
 				}
 			}
