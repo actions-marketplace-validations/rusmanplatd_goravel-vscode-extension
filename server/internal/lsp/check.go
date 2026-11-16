@@ -5,7 +5,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/rusmanplatd/goravel-lsp/internal/framework"
 	"github.com/rusmanplatd/goravel-lsp/internal/indexer"
@@ -65,24 +68,19 @@ func CheckWithOptions(opts CheckOptions) int {
 		SQLSource: opts.SQLSource,
 	})
 	sqlCat := cat.ForSQL(opts.SQLSource)
-	issues, docs := 0, 0
-
-	emit := func(file string, line, col, sev int, msg string) {
-		rel := file
-		if r, err := filepath.Rel(root, file); err == nil && !strings.HasPrefix(r, "..") {
-			rel = filepath.ToSlash(r)
-		}
-		fmt.Printf("%s:%d:%d: %s\n", file, line, col, msg)
-		if gha {
-			level := "error"
-			if sev > 1 && !opts.OnlySQL {
-				level = "warning"
-			}
-			fmt.Printf("::%s file=%s,line=%d,col=%d::%s\n", level, rel, line, col, msg)
-		}
-		issues++
+	type checkIssue struct {
+		file string
+		line int
+		col  int
+		sev  int
+		msg  string
+	}
+	type fileResult struct {
+		docs   int
+		issues []checkIssue
 	}
 
+	var files []string
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -93,50 +91,104 @@ func CheckWithOptions(opts CheckOptions) int {
 		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 			return nil
 		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return nil
-		}
-		src := string(b)
-		fi := rawsql.Extract(p, b, sqlCat)
-		docs += len(fi.Docs)
-		for _, dg := range rawsql.Analyze(fi, sqlCat) {
-			if dg.Severity > maxSeverity {
-				continue
-			}
-			pos := offsetToPos(src, dg.Start)
-			emit(p, pos.Line+1, pos.Character+1, dg.Severity, dg.Message)
-		}
-		fa := orm.AnalyzeFile(p, b, sqlCat)
-		var ormDiags []rawsql.Diag
-		if opts.OnlySQL {
-			ormDiags = fa.SQLDiagnostics(sqlCat)
-		} else {
-			ormDiags = fa.Diagnostics(sqlCat)
-		}
-		for _, dg := range ormDiags {
-			if dg.Severity > maxSeverity {
-				continue
-			}
-			pos := offsetToPos(src, dg.Start)
-			emit(p, pos.Line+1, pos.Character+1, dg.Severity, dg.Message)
-		}
-		if !opts.OnlySQL {
-			var fDiags []framework.Diag
-			fDiags = append(fDiags, framework.RequestDiagnostics(p, src, cat)...)
-			fDiags = append(fDiags, framework.ControllerDiagnostics(p, src, cat)...)
-			fDiags = append(fDiags, framework.ViewDiagnostics(p, src, cat)...)
-			fDiags = append(fDiags, framework.DriftDiagnostics(p, src, cat)...)
-			for _, dg := range fDiags {
-				if dg.Severity > maxSeverity {
-					continue
-				}
-				pos := offsetToPos(src, dg.Start)
-				emit(p, pos.Line+1, pos.Character+1, dg.Severity, dg.Message)
-			}
-		}
+		files = append(files, p)
 		return nil
 	})
+	sort.Strings(files)
+
+	results := make([]fileResult, len(files))
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(files) && len(files) > 0 {
+		workers = len(files)
+	}
+	jobs := make(chan int, len(files))
+	for i := range files {
+		jobs <- i
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				p := files[idx]
+				b, err := os.ReadFile(p)
+				if err != nil {
+					continue
+				}
+				src := string(b)
+				var res fileResult
+				fi := rawsql.Extract(p, b, sqlCat)
+				res.docs = len(fi.Docs)
+				for _, dg := range rawsql.Analyze(fi, sqlCat) {
+					if dg.Severity > maxSeverity {
+						continue
+					}
+					pos := offsetToPos(src, dg.Start)
+					res.issues = append(res.issues, checkIssue{p, pos.Line + 1, pos.Character + 1, dg.Severity, dg.Message})
+				}
+				fa := orm.AnalyzeFile(p, b, sqlCat)
+				var ormDiags []rawsql.Diag
+				if opts.OnlySQL {
+					ormDiags = fa.SQLDiagnostics(sqlCat)
+				} else {
+					ormDiags = fa.Diagnostics(sqlCat)
+				}
+				for _, dg := range ormDiags {
+					if dg.Severity > maxSeverity {
+						continue
+					}
+					pos := offsetToPos(src, dg.Start)
+					res.issues = append(res.issues, checkIssue{p, pos.Line + 1, pos.Character + 1, dg.Severity, dg.Message})
+				}
+				if !opts.OnlySQL {
+					var fDiags []framework.Diag
+					fDiags = append(fDiags, framework.RequestDiagnostics(p, src, cat)...)
+					fDiags = append(fDiags, framework.ControllerDiagnostics(p, src, cat)...)
+					fDiags = append(fDiags, framework.ViewDiagnostics(p, src, cat)...)
+					fDiags = append(fDiags, framework.DriftDiagnostics(p, src, cat)...)
+					for _, dg := range fDiags {
+						if dg.Severity > maxSeverity {
+							continue
+						}
+						pos := offsetToPos(src, dg.Start)
+						res.issues = append(res.issues, checkIssue{p, pos.Line + 1, pos.Character + 1, dg.Severity, dg.Message})
+					}
+				}
+				results[idx] = res
+			}
+		}()
+	}
+	wg.Wait()
+
+	docs, issues := 0, 0
+	emit := func(it checkIssue) {
+		rel := it.file
+		if r, err := filepath.Rel(root, it.file); err == nil && !strings.HasPrefix(r, "..") {
+			rel = filepath.ToSlash(r)
+		}
+		if gha {
+			level := "error"
+			if it.sev > 1 {
+				level = "warning"
+			}
+			fmt.Printf("::%s file=%s,line=%d,col=%d::%s\n", level, rel, it.line, it.col, it.msg)
+		} else {
+			fmt.Printf("%s:%d:%d: %s\n", it.file, it.line, it.col, it.msg)
+		}
+		issues++
+	}
+	for _, res := range results {
+		docs += res.docs
+		for _, it := range res.issues {
+			emit(it)
+		}
+	}
 	fmt.Printf("%d sql docs, %d tables, %d routes, %d configs, %d rules, %d issues\n",
 		docs, len(sqlCat.Tables), len(cat.Routes), len(cat.Configs), len(cat.Rules), issues)
 	if issues > 0 {

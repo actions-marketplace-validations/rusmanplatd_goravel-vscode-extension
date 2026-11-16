@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/rusmanplatd/goravel-lsp/internal/framework"
@@ -53,6 +52,13 @@ type LocationT struct {
 	Range Range  `json:"range"`
 }
 
+type cachedDoc struct {
+	text string
+	cat  *indexer.Catalog
+	fi   *rawsql.FileInfo
+	fa   *orm.FileAnalysis
+}
+
 // Server is the language server state.
 type Server struct {
 	in        *bufio.Reader
@@ -63,6 +69,7 @@ type Server struct {
 	cat       *indexer.Catalog
 	cats      map[string]*indexer.Catalog
 	docs      map[string]string // uri -> text
+	docCache  map[string]*cachedDoc
 	sqlSource indexer.SQLSource
 	exit      bool
 }
@@ -74,6 +81,7 @@ func New(r io.Reader, w io.Writer) *Server {
 		cat:       indexer.NewCatalog(),
 		cats:      map[string]*indexer.Catalog{},
 		docs:      map[string]string{},
+		docCache:  map[string]*cachedDoc{},
 		sqlSource: indexer.SQLSourceAuto,
 	}
 }
@@ -277,6 +285,7 @@ func (s *Server) dispatch(m *message) {
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		delete(s.docs, p.TextDocument.URI)
+		delete(s.docCache, p.TextDocument.URI)
 		s.notify("textDocument/publishDiagnostics", map[string]any{"uri": p.TextDocument.URI, "diagnostics": []any{}})
 	case "textDocument/completion":
 		s.reply(m.ID, s.completion(m.Params))
@@ -444,15 +453,30 @@ func (s *Server) resolveInput(raw json.RawMessage) (uri, path, text string, p po
 	return
 }
 
+func (s *Server) analyzeGo(uri, path, text string, cat *indexer.Catalog) (*rawsql.FileInfo, *orm.FileAnalysis) {
+	if s.docCache != nil {
+		if c := s.docCache[uri]; c != nil && c.text == text && c.cat == cat {
+			return c.fi, c.fa
+		}
+	}
+	b := []byte(text)
+	fi := rawsql.Extract(path, b, cat)
+	fa := orm.AnalyzeFile(path, b, cat)
+	if s.docCache != nil {
+		s.docCache[uri] = &cachedDoc{text: text, cat: cat, fi: fi, fa: fa}
+	}
+	return fi, fa
+}
+
 // resolve finds file, doc, scope and virtual offset for a raw SQL request.
 func (s *Server) resolve(raw json.RawMessage) (text string, p posParams, off int, fi *rawsql.FileInfo, d *rawsql.Doc, v int, sc rawsql.Scope, ok bool) {
-	_, path, text, p, off, ok := s.resolveInput(raw)
+	uri, path, text, p, off, ok := s.resolveInput(raw)
 	if !ok || !strings.HasSuffix(path, ".go") {
 		ok = false
 		return
 	}
 	cat := s.catalogForPath(path)
-	fi = rawsql.Extract(path, []byte(text), cat)
+	fi, _ = s.analyzeGo(uri, path, text, cat)
 	d = fi.DocAt(off)
 	if d == nil {
 		ok = false
@@ -470,7 +494,7 @@ func (s *Server) resolve(raw json.RawMessage) (text string, p posParams, off int
 }
 
 func (s *Server) completion(raw json.RawMessage) any {
-	_, path, text, _, off, inputOK := s.resolveInput(raw)
+	uri, path, text, _, off, inputOK := s.resolveInput(raw)
 	if !inputOK {
 		return nil
 	}
@@ -490,7 +514,7 @@ func (s *Server) completion(raw json.RawMessage) any {
 		return nil
 	}
 	// 1. Check ORM / Config / Validation spans first
-	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	_, fa := s.analyzeGo(uri, path, text, cat)
 	if items, ok := fa.Completion(off, cat); ok && len(items) > 0 {
 		return map[string]any{"isIncomplete": false, "items": items}
 	}
@@ -525,7 +549,7 @@ func (s *Server) completion(raw json.RawMessage) any {
 			items = append(items, colItem(t, c))
 		}
 	case cc.WantJoinOn:
-		jt := s.cat.Table(cc.JoinTable)
+		jt := cat.Table(cc.JoinTable)
 		if jt == nil {
 			jt = sc[cc.JoinAlias]
 		}
@@ -543,7 +567,7 @@ func (s *Server) completion(raw json.RawMessage) any {
 	case cc.WantTable:
 		// Suggest in-scope Go table variables first!
 		for varName, tblName := range fi.TableVars {
-			t := s.cat.Table(tblName)
+			t := cat.Table(tblName)
 			items = append(items, map[string]any{
 				"label":      varName,
 				"kind":       6,
@@ -553,10 +577,10 @@ func (s *Server) completion(raw json.RawMessage) any {
 				"documentation": map[string]any{"kind": "markdown", "value": tableMD(t)},
 			})
 		}
-		names := s.cat.TableNames()
+		names := cat.TableNames()
 		sort.Strings(names)
 		for _, n := range names {
-			t := s.cat.Table(n)
+			t := cat.Table(n)
 			items = append(items, map[string]any{
 				"label": n, "kind": 7, "detail": modelDetail(t),
 				"sortText":      "1_" + n,
@@ -565,7 +589,7 @@ func (s *Server) completion(raw json.RawMessage) any {
 		}
 	default:
 		if tblName := insertTargetTable(d.Text, v); tblName != "" {
-			if t := s.cat.Table(tblName); t != nil {
+			if t := cat.Table(tblName); t != nil {
 				for _, c := range t.Columns {
 					items = append(items, colItem(t, c))
 				}
@@ -605,7 +629,7 @@ func (s *Server) completion(raw json.RawMessage) any {
 		for _, fn := range sqlFunctions {
 			items = append(items, map[string]any{"label": fn, "kind": 3, "detail": "SQL function"})
 		}
-		for _, fn := range s.cat.DBFunctions {
+		for _, fn := range cat.DBFunctions {
 			detail := fn.Kind
 			if fn.ReturnType != "" {
 				detail += " -> " + fn.ReturnType
@@ -724,7 +748,7 @@ func tableMD(t *indexer.Table) string {
 }
 
 func (s *Server) hover(raw json.RawMessage) any {
-	_, path, text, _, off, inputOK := s.resolveInput(raw)
+	uri, path, text, _, off, inputOK := s.resolveInput(raw)
 	if !inputOK {
 		return nil
 	}
@@ -740,7 +764,7 @@ func (s *Server) hover(raw json.RawMessage) any {
 		return nil
 	}
 	// 1. Check ORM / Config / Validation spans first
-	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	_, fa := s.analyzeGo(uri, path, text, cat)
 	if md, st, en, ok := fa.Hover(off, cat); ok {
 		return map[string]any{
 			"contents": map[string]any{"kind": "markdown", "value": md},
@@ -848,7 +872,7 @@ func (s *Server) definition(raw json.RawMessage) any {
 	}
 
 	// 1. Check ORM / Config / Validation spans first
-	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	_, fa := s.analyzeGo(uri, path, text, cat)
 	for _, l := range fa.Definition(off, cat) {
 		add(l, 0)
 	}
@@ -928,14 +952,13 @@ func (s *Server) diagnose(uri string) {
 	sqlCat := cat.ForSQL(s.sqlSource)
 	diags := []map[string]any{}
 	if strings.HasSuffix(uri, ".go") {
-		fi := rawsql.Extract(path, []byte(text), sqlCat)
+		fi, fa := s.analyzeGo(uri, path, text, sqlCat)
 		for _, d := range rawsql.Analyze(fi, sqlCat) {
 			diags = append(diags, map[string]any{
 				"range":    Range{offsetToPos(text, d.Start), offsetToPos(text, d.End)},
 				"severity": d.Severity, "source": "goravel-sql", "message": d.Message,
 			})
 		}
-		fa := orm.AnalyzeFile(path, []byte(text), sqlCat)
 		for _, d := range fa.Diagnostics(sqlCat) {
 			diags = append(diags, map[string]any{
 				"range":    Range{offsetToPos(text, d.Start), offsetToPos(text, d.End)},
@@ -983,7 +1006,7 @@ func (s *Server) codeAction(raw json.RawMessage) any {
 	actions := []map[string]any{}
 
 	if strings.HasSuffix(uri, ".go") {
-		fi := rawsql.Extract(path, []byte(text), cat)
+		fi, _ := s.analyzeGo(uri, path, text, cat)
 		edit := func(title, kind string, start, end int, newText string) {
 			actions = append(actions, map[string]any{
 				"title": title, "kind": kind,
@@ -1114,7 +1137,7 @@ func (s *Server) codeLens(raw json.RawMessage) any {
 		}
 		return lenses
 	}
-	for _, r := range s.cat.Routes {
+	for _, r := range cat.Routes {
 		if !r.CtrlLoc.Valid() || filepath.Clean(r.CtrlLoc.File) != path {
 			continue
 		}
@@ -1143,7 +1166,7 @@ func (s *Server) codeLens(raw json.RawMessage) any {
 			},
 		)
 	}
-	for _, cmd := range s.cat.Commands {
+	for _, cmd := range cat.Commands {
 		if !cmd.Loc.Valid() || filepath.Clean(cmd.Loc.File) != path {
 			continue
 		}
@@ -1157,7 +1180,7 @@ func (s *Server) codeLens(raw json.RawMessage) any {
 			},
 		})
 	}
-	for _, ev := range s.cat.Events {
+	for _, ev := range cat.Events {
 		if !ev.Loc.Valid() || filepath.Clean(ev.Loc.File) != path || len(ev.Listeners) == 0 {
 			continue
 		}
@@ -1175,11 +1198,11 @@ func (s *Server) codeLens(raw json.RawMessage) any {
 			},
 		})
 	}
-	for _, obs := range s.cat.Observers {
+	for _, obs := range cat.Observers {
 		if obs.Model == "" {
 			continue
 		}
-		t := s.cat.Model(obs.Model)
+		t := cat.Model(obs.Model)
 		if t == nil || !t.Loc.Valid() || filepath.Clean(t.Loc.File) != path {
 			continue
 		}
@@ -1200,7 +1223,7 @@ func (s *Server) codeLens(raw json.RawMessage) any {
 	if strings.Contains(filepath.ToSlash(path), "/app/models/") {
 		scopesByModel := map[string][]string{}
 		firstLocByModel := map[string]indexer.Location{}
-		for _, sc := range s.cat.Scopes {
+		for _, sc := range cat.Scopes {
 			if sc.Model == "" {
 				continue
 			}
@@ -1210,7 +1233,7 @@ func (s *Server) codeLens(raw json.RawMessage) any {
 			}
 		}
 		for mName, scNames := range scopesByModel {
-			t := s.cat.Model(mName)
+			t := cat.Model(mName)
 			if t == nil || !t.Loc.Valid() || filepath.Clean(t.Loc.File) != path {
 				continue
 			}
@@ -1286,7 +1309,7 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 	if !strings.HasSuffix(uri, ".go") {
 		return nil
 	}
-	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	_, fa := s.analyzeGo(p.TextDocument.URI, path, text, cat)
 	for _, h := range fa.InlayHints(cat) {
 		hints = append(hints, map[string]any{
 			"position":    offsetToPos(text, h.Offset),
@@ -1371,8 +1394,7 @@ func (s *Server) semanticTokens(raw json.RawMessage) any {
 	}
 	path := uriToPath(uri)
 	cat := s.catalogForPath(path)
-	fi := rawsql.Extract(path, []byte(text), cat)
-	fa := orm.AnalyzeFile(path, []byte(text), cat)
+	fi, fa := s.analyzeGo(uri, path, text, cat)
 
 	toks := rawsql.SemanticTokens(fi, cat)
 	seen := map[int]bool{}
@@ -1475,11 +1497,12 @@ func (s *Server) registerBootstrap(raw json.RawMessage) any {
 	}
 	_ = json.Unmarshal(raw, &p)
 	clean := filepath.Clean(p.File)
-	unreg := s.cat.UnregisteredByFile[clean]
+	cat := s.catalogForPath(clean)
+	unreg := cat.UnregisteredByFile[clean]
 	if unreg == nil {
 		return map[string]any{"ok": false, "error": "Component is already registered or not found"}
 	}
-	act, ok := framework.ResolveBootstrapRegistrationAction(s.cat, unreg)
+	act, ok := framework.ResolveBootstrapRegistrationAction(cat, unreg)
 	if !ok || len(act.Edits) == 0 {
 		return map[string]any{"ok": false, "error": "Could not locate matching bootstrap registration slice"}
 	}
@@ -1612,6 +1635,13 @@ func (s *Server) routeSample(raw json.RawMessage) any {
 
 // ---- position helpers (LSP uses UTF-16 columns) ----
 
+func utf16RuneLen(r rune) int {
+	if r >= 0x10000 {
+		return 2
+	}
+	return 1
+}
+
 func posToOffset(text string, p Position) int {
 	line, i := 0, 0
 	for line < p.Line {
@@ -1625,13 +1655,16 @@ func posToOffset(text string, p Position) int {
 	units := 0
 	for i < len(text) && text[i] != '\n' && units < p.Character {
 		r, n := utf8.DecodeRuneInString(text[i:])
-		units += len(utf16.Encode([]rune{r}))
+		units += utf16RuneLen(r)
 		i += n
 	}
 	return i
 }
 
 func offsetToPos(text string, off int) Position {
+	if off < 0 {
+		off = 0
+	}
 	if off > len(text) {
 		off = len(text)
 	}
@@ -1639,7 +1672,7 @@ func offsetToPos(text string, off int) Position {
 	start := strings.LastIndexByte(text[:off], '\n') + 1
 	units := 0
 	for _, r := range text[start:off] {
-		units += len(utf16.Encode([]rune{r}))
+		units += utf16RuneLen(r)
 	}
 	return Position{line, units}
 }
