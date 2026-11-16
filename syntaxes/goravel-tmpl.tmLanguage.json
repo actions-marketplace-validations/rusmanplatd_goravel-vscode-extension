@@ -77,7 +77,7 @@
           "name": "support.function.builtin.goravel-tmpl"
         },
         {
-          "match": "(\\$[A-Za-z_][A-Za-z0-9_]*)?((?:\\.[A-Za-z_][A-Za-z0-9_]*)+)",
+          "match": "(\\$[A-Za-z0-9_]*)?((?:\\.[A-Za-z_][A-Za-z0-9_]*)+)",
           "captures": {
             "1": { "name": "variable.other.readwrite.goravel-tmpl" },
             "2": { "name": "variable.other.property.goravel-tmpl" }
@@ -88,7 +88,7 @@
           "name": "variable.other.readwrite.goravel-tmpl"
         },
         {
-          "match": "(?<=\\s|\\(|\\||\\{)(\\.|\\$)(?=\\s|\\)|\\||\\})",
+          "match": "(?<=\\s|\\(|\\||\\{|-)(\\.|\\$)(?=\\s|\\)|\\||\\}|-)",
           "name": "variable.language.context.goravel-tmpl"
         },
         {

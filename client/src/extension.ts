@@ -19,6 +19,10 @@ import {
 
 let client: LanguageClient | undefined;
 let fileWatcher: vscode.FileSystemWatcher | undefined;
+let saveRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let erDiagramPanel: vscode.WebviewPanel | undefined;
+let routeMatrixPanel: vscode.WebviewPanel | undefined;
+let queryPreviewPanel: vscode.WebviewPanel | undefined;
 let statusBar: vscode.StatusBarItem | undefined;
 let customCommands: CommandInfo[] = [];
 let customSeeders: SeederInfo[] = [];
@@ -284,35 +288,49 @@ export async function activate(ctx: vscode.ExtensionContext) {
       if (!client) return;
       const res = await client.sendRequest<{ mermaid?: string }>("goravel/erDiagram", {});
       const mermaid = res?.mermaid || "erDiagram\n";
-      const panel = vscode.window.createWebviewPanel(
-        "goravelErDiagram",
-        "Goravel Schema ER Diagram",
-        vscode.ViewColumn.One,
-        { enableScripts: true }
-      );
-      panel.webview.html = renderErDiagramHtml(mermaid, currentTables);
-      panel.webview.onDidReceiveMessage(async (msg) => {
-        if (msg.type === "open" && msg.file) {
-          await openFileAt(msg.file, msg.line || 0, 0);
-        }
-      });
+      if (!erDiagramPanel) {
+        erDiagramPanel = vscode.window.createWebviewPanel(
+          "goravelErDiagram",
+          "Goravel Schema ER Diagram",
+          vscode.ViewColumn.One,
+          { enableScripts: true }
+        );
+        erDiagramPanel.onDidDispose(() => {
+          erDiagramPanel = undefined;
+        });
+        erDiagramPanel.webview.onDidReceiveMessage(async (msg) => {
+          if (msg.type === "open" && msg.file) {
+            await openFileAt(msg.file, msg.line || 0, 0);
+          }
+        });
+      } else {
+        erDiagramPanel.reveal(vscode.ViewColumn.One);
+      }
+      erDiagramPanel.webview.html = renderErDiagramHtml(mermaid, currentTables);
     }),
     vscode.commands.registerCommand("goravel.showRouteMatrix", async () => {
       await refreshOverview();
-      const panel = vscode.window.createWebviewPanel(
-        "goravelRouteMatrix",
-        "Goravel Route Matrix",
-        vscode.ViewColumn.One,
-        { enableScripts: true }
-      );
-      panel.webview.html = renderRouteMatrixHtml(currentRoutes);
-      panel.webview.onDidReceiveMessage(async (msg) => {
-        if (msg.type === "open" && msg.file) {
-          await openFileAt(msg.file, msg.line || 0, 0);
-        } else if (msg.type === "test" && msg.route) {
-          await openRouteTestRequest(msg.route);
-        }
-      });
+      if (!routeMatrixPanel) {
+        routeMatrixPanel = vscode.window.createWebviewPanel(
+          "goravelRouteMatrix",
+          "Goravel Route Matrix",
+          vscode.ViewColumn.One,
+          { enableScripts: true }
+        );
+        routeMatrixPanel.onDidDispose(() => {
+          routeMatrixPanel = undefined;
+        });
+        routeMatrixPanel.webview.onDidReceiveMessage(async (msg) => {
+          if (msg.type === "open" && msg.file) {
+            await openFileAt(msg.file, msg.line || 0, 0);
+          } else if (msg.type === "test" && msg.route) {
+            await openRouteTestRequest(msg.route);
+          }
+        });
+      } else {
+        routeMatrixPanel.reveal(vscode.ViewColumn.One);
+      }
+      routeMatrixPanel.webview.html = renderRouteMatrixHtml(currentRoutes);
     }),
     vscode.commands.registerCommand("goravel.explainQuery", async (sql: string) => {
       if (!client) return;
@@ -336,16 +354,30 @@ export async function activate(ctx: vscode.ExtensionContext) {
       } catch {
         rows = [];
       }
-      const panel = vscode.window.createWebviewPanel(
-        "goravelQueryPreview",
-        "Goravel Query Preview",
-        vscode.ViewColumn.Beside,
-        { enableScripts: false }
-      );
-      panel.webview.html = renderQueryPreviewHtml(sql, rows);
+      if (!queryPreviewPanel) {
+        queryPreviewPanel = vscode.window.createWebviewPanel(
+          "goravelQueryPreview",
+          "Goravel Query Preview",
+          vscode.ViewColumn.Beside,
+          { enableScripts: false }
+        );
+        queryPreviewPanel.onDidDispose(() => {
+          queryPreviewPanel = undefined;
+        });
+      } else {
+        queryPreviewPanel.reveal(vscode.ViewColumn.Beside);
+      }
+      queryPreviewPanel.webview.html = renderQueryPreviewHtml(sql, rows);
     }),
-    vscode.workspace.onDidSaveTextDocument(() => {
-      setTimeout(() => refreshOverview(), 300);
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.uri.scheme !== "file" || !vscode.workspace.getWorkspaceFolder(doc.uri)) return;
+      const base = path.basename(doc.uri.fsPath);
+      if (!/\.(go|tmpl|gohtml)$/.test(base) && !base.startsWith(".env")) return;
+      if (saveRefreshTimer) clearTimeout(saveRefreshTimer);
+      saveRefreshTimer = setTimeout(() => {
+        saveRefreshTimer = undefined;
+        refreshOverview();
+      }, 300);
     })
   );
 
@@ -353,6 +385,10 @@ export async function activate(ctx: vscode.ExtensionContext) {
 }
 
 export async function deactivate() {
+  if (saveRefreshTimer) {
+    clearTimeout(saveRefreshTimer);
+    saveRefreshTimer = undefined;
+  }
   fileWatcher?.dispose();
   fileWatcher = undefined;
   await client?.stop();
@@ -493,7 +529,7 @@ ${WEBVIEW_CSP}
 <body>
   <h2>Goravel Route Matrix (${routes.length} routes)</h2>
   <div class="toolbar">
-    <input id="search" type="text" placeholder="Filter by path, handler, middleware, or module..." oninput="render()" />
+    <input id="search" type="text" placeholder="Filter by path, handler, middleware, or module..." oninput="debouncedRender()" />
     <select id="method" onchange="render()">
       <option value="">All Methods</option>
       <option value="GET">GET</option>
@@ -501,6 +537,9 @@ ${WEBVIEW_CSP}
       <option value="PUT">PUT</option>
       <option value="PATCH">PATCH</option>
       <option value="DELETE">DELETE</option>
+      <option value="OPTIONS">OPTIONS</option>
+      <option value="HEAD">HEAD</option>
+      <option value="ANY">ANY</option>
       <option value="gRPC">gRPC</option>
     </select>
   </div>
@@ -558,6 +597,11 @@ ${WEBVIEW_CSP}
           </td>
         </tr>\`)
         .join("");
+    }
+    let renderTimer = null;
+    function debouncedRender() {
+      if (renderTimer) clearTimeout(renderTimer);
+      renderTimer = setTimeout(render, 120);
     }
     render();
   </script>

@@ -191,7 +191,7 @@ func (s *Server) dispatch(m *message) {
 				"hoverProvider":          true,
 				"definitionProvider":     true,
 				"referencesProvider":     true,
-				"renameProvider":         true,
+				"renameProvider":         map[string]any{"prepareProvider": true},
 				"codeActionProvider":     true,
 				"codeLensProvider":       map[string]any{"resolveProvider": false},
 				"inlayHintProvider":      true,
@@ -297,6 +297,8 @@ func (s *Server) dispatch(m *message) {
 		s.reply(m.ID, s.definition(m.Params))
 	case "textDocument/references":
 		s.reply(m.ID, s.references(m.Params))
+	case "textDocument/prepareRename":
+		s.reply(m.ID, s.prepareRename(m.Params))
 	case "textDocument/rename":
 		s.reply(m.ID, s.rename(m.Params))
 	case "textDocument/codeLens":
@@ -1285,6 +1287,7 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 		TextDocument struct {
 			URI string `json:"uri"`
 		} `json:"textDocument"`
+		Range *Range `json:"range,omitempty"`
 	}
 	_ = json.Unmarshal(raw, &p)
 	uri := p.TextDocument.URI
@@ -1292,13 +1295,32 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 	if !ok {
 		return nil
 	}
+	inRange := func(pos Position) bool {
+		if p.Range == nil {
+			return true
+		}
+		if pos.Line < p.Range.Start.Line || pos.Line > p.Range.End.Line {
+			return false
+		}
+		if pos.Line == p.Range.Start.Line && pos.Character < p.Range.Start.Character {
+			return false
+		}
+		if pos.Line == p.Range.End.Line && pos.Character > p.Range.End.Character {
+			return false
+		}
+		return true
+	}
 	path := uriToPath(uri)
 	cat := s.catalogForPath(path)
 	var hints []map[string]any
 	if framework.IsTemplateFile(path) {
 		for _, h := range framework.TemplateInlayHints(path, text, cat) {
+			pos := offsetToPos(text, h.Offset)
+			if !inRange(pos) {
+				continue
+			}
 			hints = append(hints, map[string]any{
-				"position":    offsetToPos(text, h.Offset),
+				"position":    pos,
 				"label":       h.Label,
 				"kind":        1, // Type
 				"paddingLeft": false,
@@ -1311,32 +1333,48 @@ func (s *Server) inlayHint(raw json.RawMessage) any {
 	}
 	_, fa := s.analyzeGo(p.TextDocument.URI, path, text, cat)
 	for _, h := range fa.InlayHints(cat) {
+		pos := offsetToPos(text, h.Offset)
+		if !inRange(pos) {
+			continue
+		}
 		hints = append(hints, map[string]any{
-			"position":    offsetToPos(text, h.Offset),
+			"position":    pos,
 			"label":       h.Label,
 			"kind":        2,
 			"paddingLeft": true,
 		})
 	}
 	for _, h := range framework.ScheduleInlayHints(path, text) {
+		pos := offsetToPos(text, h.Offset)
+		if !inRange(pos) {
+			continue
+		}
 		hints = append(hints, map[string]any{
-			"position":    offsetToPos(text, h.Offset),
+			"position":    pos,
 			"label":       h.Label,
 			"kind":        2,
 			"paddingLeft": true,
 		})
 	}
 	for _, h := range framework.RouteInlayHints(path, text, cat) {
+		pos := offsetToPos(text, h.Offset)
+		if !inRange(pos) {
+			continue
+		}
 		hints = append(hints, map[string]any{
-			"position":    offsetToPos(text, h.Offset),
+			"position":    pos,
 			"label":       h.Label,
 			"kind":        2,
 			"paddingLeft": true,
 		})
 	}
 	for _, h := range framework.ViewInlayHints(path, text, cat) {
+		pos := offsetToPos(text, h.Offset)
+		if !inRange(pos) {
+			continue
+		}
 		hints = append(hints, map[string]any{
-			"position":    offsetToPos(text, h.Offset),
+			"position":    pos,
 			"label":       h.Label,
 			"kind":        2,
 			"paddingLeft": true,

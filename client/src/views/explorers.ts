@@ -419,8 +419,9 @@ export class CommandsTreeProvider implements vscode.TreeDataProvider<CommandNode
     if (el.kind === "command") {
       const c = el.cmd;
       const item = new vscode.TreeItem(c.signature, vscode.TreeItemCollapsibleState.None);
+      item.id = `cmd:${c.signature}`;
       item.description = c.description || c.structName;
-      item.tooltip = `Run: go run . artisan ${c.signature}`;
+      item.tooltip = `Run artisan ${c.signature}`;
       item.iconPath = new vscode.ThemeIcon("play");
       item.command = {
         title: `Run ${c.signature}`,
@@ -432,8 +433,9 @@ export class CommandsTreeProvider implements vscode.TreeDataProvider<CommandNode
     if (el.kind === "seeder") {
       const s = el.seeder;
       const item = new vscode.TreeItem(s.signature || s.name, vscode.TreeItemCollapsibleState.None);
+      item.id = `seeder:${s.signature || s.name}`;
       item.description = s.name;
-      item.tooltip = `Run: go run . artisan db:seed --seeder=${s.signature}`;
+      item.tooltip = `Run artisan db:seed --seeder=${s.signature}`;
       item.iconPath = new vscode.ThemeIcon("play");
       item.command = {
         title: `Run Seeder ${s.signature}`,

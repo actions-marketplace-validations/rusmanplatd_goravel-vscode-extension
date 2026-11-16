@@ -16,7 +16,7 @@
     "sql-tokens": {
       "patterns": [
         {
-          "match": "--.*$",
+          "match": "--[^\\n\"`]*",
           "name": "comment.line.double-dash.sql"
         },
         {
