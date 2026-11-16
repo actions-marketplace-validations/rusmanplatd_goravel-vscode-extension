@@ -26,21 +26,35 @@ func checkSQLSyntax(sql string, dynamic bool) []Issue {
 
 	noComments := maskSQLComments(sql)
 
-	// 1. Check balanced quotes and parentheses
+	// 1. Check balanced quotes, dollar-quoted strings, and parentheses
 	inSingle := false
+	inSingleEscape := false
 	inDouble := false
+	dollarTag := ""
 	quoteStart := -1
 	var parenStack []int
 
 	for i := 0; i < len(noComments); i++ {
 		c := noComments[i]
+		if dollarTag != "" {
+			if c == '$' && strings.HasPrefix(noComments[i:], dollarTag) {
+				i += len(dollarTag) - 1
+				dollarTag = ""
+			}
+			continue
+		}
 		if inSingle {
+			if inSingleEscape && c == '\\' {
+				i++
+				continue
+			}
 			if c == '\'' {
 				if i+1 < len(noComments) && noComments[i+1] == '\'' {
 					i++
 					continue
 				}
 				inSingle = false
+				inSingleEscape = false
 			}
 			continue
 		}
@@ -54,9 +68,25 @@ func checkSQLSyntax(sql string, dynamic bool) []Issue {
 			}
 			continue
 		}
+		if (c == 'E' || c == 'e') && i+1 < len(noComments) && noComments[i+1] == '\'' && (i == 0 || !isWord(noComments[i-1])) {
+			inSingle = true
+			inSingleEscape = true
+			quoteStart = i + 1
+			i++
+			continue
+		}
+		if c == '$' {
+			if tag, ok := parseDollarTag(noComments[i:]); ok {
+				dollarTag = tag
+				quoteStart = i
+				i += len(tag) - 1
+				continue
+			}
+		}
 		switch c {
 		case '\'':
 			inSingle = true
+			inSingleEscape = false
 			quoteStart = i
 		case '"':
 			inDouble = true
@@ -71,7 +101,7 @@ func checkSQLSyntax(sql string, dynamic bool) []Issue {
 			}
 		}
 	}
-	if inSingle && quoteStart >= 0 {
+	if (inSingle || dollarTag != "") && quoteStart >= 0 {
 		out = append(out, Issue{quoteStart, quoteStart + 1, 1, "SQL syntax error: unclosed string literal"})
 	}
 	if inDouble && quoteStart >= 0 {
@@ -174,18 +204,38 @@ func maskSQLComments(sql string) string {
 	return string(b)
 }
 
+func parseDollarTag(s string) (string, bool) {
+	if len(s) < 2 || s[0] != '$' {
+		return "", false
+	}
+	if s[1] == '$' {
+		return "$$", true
+	}
+	if !((s[1] >= 'a' && s[1] <= 'z') || (s[1] >= 'A' && s[1] <= 'Z') || s[1] == '_') {
+		return "", false
+	}
+	for i := 2; i < len(s); i++ {
+		c := s[i]
+		if c == '$' {
+			return s[:i+1], true
+		}
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return "", false
+		}
+	}
+	return "", false
+}
+
 func maskStringLiterals(sql string) string {
 	b := []byte(maskSQLComments(sql))
 	inSingle := false
+	inSingleEscape := false
+	dollarTag := ""
 	for i := 0; i < len(b); i++ {
-		if inSingle {
-			if b[i] == '\'' {
-				if i+1 < len(b) && b[i+1] == '\'' {
-					b[i], b[i+1] = ' ', ' '
-					i++
-					continue
-				}
-				inSingle = false
+		if dollarTag != "" {
+			if b[i] == '$' && strings.HasPrefix(string(b[i:]), dollarTag) {
+				i += len(dollarTag) - 1
+				dollarTag = ""
 				continue
 			}
 			if b[i] != '\n' {
@@ -193,8 +243,49 @@ func maskStringLiterals(sql string) string {
 			}
 			continue
 		}
+		if inSingle {
+			if inSingleEscape && b[i] == '\\' && i+1 < len(b) {
+				if b[i] != '\n' {
+					b[i] = ' '
+				}
+				if b[i+1] != '\n' {
+					b[i+1] = ' '
+				}
+				i++
+				continue
+			}
+			if b[i] == '\'' {
+				if i+1 < len(b) && b[i+1] == '\'' {
+					b[i], b[i+1] = ' ', ' '
+					i++
+					continue
+				}
+				inSingle = false
+				inSingleEscape = false
+				continue
+			}
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+			continue
+		}
+		if (b[i] == 'E' || b[i] == 'e') && i+1 < len(b) && b[i+1] == '\'' && (i == 0 || !isWord(b[i-1])) {
+			inSingle = true
+			inSingleEscape = true
+			b[i] = ' '
+			i++
+			continue
+		}
+		if b[i] == '$' {
+			if tag, ok := parseDollarTag(string(b[i:])); ok {
+				dollarTag = tag
+				i += len(tag) - 1
+				continue
+			}
+		}
 		if b[i] == '\'' {
 			inSingle = true
+			inSingleEscape = false
 		}
 	}
 	return string(b)

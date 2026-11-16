@@ -2,7 +2,7 @@
   "name": "goravel-vscode",
   "displayName": "Goravel",
   "description": "Goravel IDE tooling: Raw SQL LSP, ORM intelligence, Views & Templates (.tmpl/.gohtml), Config, Routes, Validation, Explorers, and Artisan CLI",
-  "version": "0.8.6",
+  "version": "0.9.1",
   "publisher": "rusmanplatd",
   "repository": {
     "type": "git",
@@ -86,7 +86,7 @@
         {
           "id": "goravel-explorer",
           "title": "Goravel",
-          "icon": "$(database)"
+          "icon": "media/goravel.svg"
         }
       ]
     },
@@ -440,8 +440,13 @@
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^4.0.0",
-    "esbuild": "^0.24.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.5.0"
+  },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "^11.0.1"
+    }
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

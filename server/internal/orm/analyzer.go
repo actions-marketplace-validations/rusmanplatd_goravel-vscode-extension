@@ -35,6 +35,7 @@ const (
 	SpanRequestInput                // ctx.Request().Input("name"), Query("page")
 	SpanLangKey                     // facades.Lang(ctx).Get("messages.welcome")
 	SpanGateAbility                 // facades.Gate().Allows("update-post")
+	SpanORMTable                    // facades.DB().Table("ref_geo_cities")
 )
 
 // Span represents a string literal in a Go file with Goravel framework semantics.
@@ -91,6 +92,11 @@ var (
 		"now": true, "count": true, "sum": true, "avg": true, "min": true, "max": true, "coalesce": true,
 		"lower": true, "upper": true, "date": true, "extract": true, "cast": true,
 		"join": true, "inner": true, "left": true, "right": true, "outer": true, "cross": true, "on": true,
+		"case": true, "when": true, "then": true, "else": true, "end": true, "distinct": true,
+		"any": true, "all": true, "some": true, "nulls": true, "first": true, "last": true,
+		"text": true, "varchar": true, "char": true, "int": true, "integer": true, "bigint": true,
+		"smallint": true, "boolean": true, "bool": true, "uuid": true, "json": true, "jsonb": true,
+		"timestamp": true, "timestamptz": true, "interval": true, "numeric": true, "float": true, "double": true,
 	}
 )
 
@@ -275,6 +281,14 @@ func AnalyzeFile(path string, src []byte, cat *indexer.Catalog) *FileAnalysis {
 				return true
 			}
 			mname := sel.Sel.Name
+
+			// facades.DB().Table("name") / Query().Table("name"): hoverable table literal
+			if mname == "Table" && len(call.Args) == 1 {
+				if bl, ok := call.Args[0].(*ast.BasicLit); ok && bl.Kind == token.STRING {
+					tn, _ := parseTableAndAlias(strings.Trim(bl.Value, "\"`"))
+					addLitSpan(fa, off, bl, SpanORMTable, 0, cat.Table(indexer.StripSchema(tn)), nil)
+				}
+			}
 
 			// Check facades.Config().Get*("...") and config.Env("...")
 			if cfgGetMethods[mname] && len(call.Args) >= 1 && isConfigReceiver(sel.X) {
@@ -833,7 +847,11 @@ func (fa *FileAnalysis) Completion(goOff int, cat *indexer.Catalog) ([]map[strin
 		return items, true
 
 	case SpanORMRelation:
-		t := resolveRelationChainTable(sp.Table, sp.Text[:goOff-sp.Start], cat)
+		relOff := goOff - sp.Start
+		if relOff < 0 || relOff > len(sp.Text) {
+			return nil, false
+		}
+		t := resolveRelationChainTable(sp.Table, sp.Text[:relOff], cat)
 		if t == nil {
 			return nil, false
 		}
@@ -887,7 +905,11 @@ func (fa *FileAnalysis) Completion(goOff int, cat *indexer.Catalog) ([]map[strin
 		return items, true
 
 	case SpanRuleValue:
-		before := sp.Text[:goOff-sp.Start]
+		relOff := goOff - sp.Start
+		if relOff < 0 || relOff > len(sp.Text) {
+			return nil, false
+		}
+		before := sp.Text[:relOff]
 		seg := before
 		if i := strings.LastIndexByte(before, '|'); i >= 0 {
 			seg = before[i+1:]
@@ -1121,6 +1143,11 @@ func (fa *FileAnalysis) Hover(goOff int, cat *indexer.Catalog) (md string, start
 			return langDocMD(sp.Text, locales), sp.Start, sp.End, true
 		}
 
+	case SpanORMTable:
+		if sp.Table != nil {
+			return tableDocMD(sp.Table), sp.Start, sp.End, true
+		}
+
 	case SpanGateAbility:
 		if gi, exists := cat.Gates[sp.Text]; exists && gi != nil {
 			return fmt.Sprintf("**Gate Ability `%s`**\n\n- Defined at `%s:%d`", gi.Ability, gi.Loc.File, gi.Loc.Line+1), sp.Start, sp.End, true
@@ -1312,16 +1339,27 @@ func (fa *FileAnalysis) diagnosticsFiltered(cat *indexer.Catalog, onlySQL bool) 
 			if sp.Table == nil {
 				continue
 			}
-			fields := strings.Fields(sp.Text)
-			if len(fields) > 0 {
-				col := fields[0]
-				if i := strings.LastIndexByte(col, '.'); i >= 0 {
-					col = col[i+1:]
+			for _, part := range strings.Split(sp.Text, ",") {
+				fields := strings.Fields(part)
+				if len(fields) == 0 {
+					continue
 				}
-				if !strings.Contains(col, "(") && sp.Table.Column(col) == nil {
+				rawCol := fields[0]
+				targetTable := sp.Table
+				col := rawCol
+				if i := strings.LastIndexByte(rawCol, '.'); i >= 0 {
+					qual := rawCol[:i]
+					col = rawCol[i+1:]
+					if qt := sp.resolveTable(qual); qt != nil {
+						targetTable = qt
+					} else {
+						continue
+					}
+				}
+				if col != "" && !strings.Contains(col, "(") && targetTable.Column(col) == nil {
 					out = append(out, rawsql.Diag{
-						Start: sp.Start, End: sp.Start + len(fields[0]), Severity: 1,
-						Message: fmt.Sprintf("Column '%s' does not exist on table '%s'", col, sp.Table.Name),
+						Start: sp.Start, End: sp.End, Severity: 1,
+						Message: fmt.Sprintf("Column '%s' does not exist on table '%s'", col, targetTable.Name),
 					})
 				}
 			}
@@ -1606,12 +1644,31 @@ func langDocMD(key string, locales map[string]indexer.TranslationEntry) string {
 func strMask(s string) string {
 	b := []byte(s)
 	inStr := false
-	for i := range b {
+	for i := 0; i < len(b); i++ {
+		if inStr {
+			if b[i] == '\'' {
+				if i+1 < len(b) && b[i+1] == '\'' {
+					b[i], b[i+1] = ' ', ' '
+					i++
+					continue
+				}
+				inStr = false
+			}
+			b[i] = ' '
+			continue
+		}
 		if b[i] == '\'' {
-			inStr = !inStr
+			inStr = true
 			b[i] = ' '
-		} else if inStr {
-			b[i] = ' '
+		} else if b[i] == ':' && i+1 < len(b) && b[i+1] == ':' {
+			// Mask PostgreSQL ::type casts so type names aren't flagged as missing columns
+			b[i], b[i+1] = ' ', ' '
+			i += 2
+			for i < len(b) && ((b[i] >= 'a' && b[i] <= 'z') || (b[i] >= 'A' && b[i] <= 'Z') || (b[i] >= '0' && b[i] <= '9') || b[i] == '_' || b[i] == '[' || b[i] == ']') {
+				b[i] = ' '
+				i++
+			}
+			i--
 		}
 	}
 	return string(b)
@@ -1710,6 +1767,29 @@ func colDocMD(t *indexer.Table, c *indexer.Column) string {
 	}
 	if c.Doc != "" {
 		fmt.Fprintf(&b, "\n%s\n", c.Doc)
+	}
+	return b.String()
+}
+
+func tableDocMD(t *indexer.Table) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Table `%s`**\n\n", t.Name)
+	if t.Model != "" {
+		fmt.Fprintf(&b, "- Model: `models.%s`\n", t.Model)
+	}
+	if t.Schema != "" {
+		fmt.Fprintf(&b, "- Schema: `%s`\n", t.Schema)
+	}
+	fmt.Fprintf(&b, "- Columns: %d\n", len(t.Columns))
+	max := len(t.Columns)
+	if max > 12 {
+		max = 12
+	}
+	for _, c := range t.Columns[:max] {
+		fmt.Fprintf(&b, "  - `%s` %s\n", c.Name, colTypeDetail(c))
+	}
+	if len(t.Columns) > max {
+		fmt.Fprintf(&b, "  - … %d more\n", len(t.Columns)-max)
 	}
 	return b.String()
 }

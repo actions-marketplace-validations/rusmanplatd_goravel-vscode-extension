@@ -424,6 +424,9 @@ func RouteAndControllerHover(path, src string, cat *indexer.Catalog, goOff int) 
 			}
 		}
 		clean := filepath.Clean(path)
+		if goOff < 0 || goOff > len(src) {
+			return nil
+		}
 		line := strings.Count(src[:goOff], "\n")
 		for _, r := range cat.Routes {
 			if filepath.Clean(r.Loc.File) == clean && r.Loc.Line == line {

@@ -43,6 +43,14 @@ function getArtisanPrefix(): string {
   return cfg && cfg.trim() ? cfg.trim() : "go run . artisan";
 }
 
+function shellQuote(arg: string): string {
+  if (/^[A-Za-z0-9_.:/@=-]+$/.test(arg)) return arg;
+  if (process.platform === "win32") {
+    return `"${arg.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  }
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
 export function runArtisanInTerminal(args: string) {
   const term = getTerminal();
   term.show(true);
@@ -56,7 +64,7 @@ async function promptAndRun(cmd: string, prompt: string) {
     ignoreFocusOut: true,
   });
   if (!name || !name.trim()) return;
-  runArtisanInTerminal(`${cmd} ${name.trim()}`);
+  runArtisanInTerminal(`${cmd} ${shellQuote(name.trim())}`);
 }
 
 export function registerArtisanCommands(
@@ -167,12 +175,18 @@ export function registerArtisanCommands(
         placeHolder: "admin/dashboard.tmpl",
       });
       if (!rawName || !rawName.trim()) return;
-      let relView = rawName.trim().replace(/^\/+/, "");
+      let relView = rawName.trim().replace(/\\/g, "/").replace(/^\/+/, "");
       if (!path.extname(relView)) {
         relView += ".tmpl";
       }
       if (!ws) {
-        runArtisanInTerminal(`make:view ${relView}`);
+        runArtisanInTerminal(`make:view ${shellQuote(relView)}`);
+        return;
+      }
+      const viewsRoot = path.resolve(ws, "resources", "views");
+      const fullPath = path.resolve(viewsRoot, ...relView.split("/"));
+      if (fullPath !== viewsRoot && !fullPath.startsWith(viewsRoot + path.sep)) {
+        vscode.window.showErrorMessage("View path must stay inside resources/views/.");
         return;
       }
       const mode = await vscode.window.showQuickPick(
@@ -189,7 +203,7 @@ export function registerArtisanCommands(
           },
           {
             label: "$(terminal) Run `artisan make:view` in Terminal",
-            description: `go run . artisan make:view ${relView}`,
+            description: `${getArtisanPrefix()} make:view ${relView}`,
             id: "cli",
           },
         ],
@@ -197,10 +211,9 @@ export function registerArtisanCommands(
       );
       if (!mode) return;
       if (mode.id === "cli") {
-        runArtisanInTerminal(`make:view ${relView}`);
+        runArtisanInTerminal(`make:view ${shellQuote(relView)}`);
         return;
       }
-      const fullPath = path.join(ws, "resources", "views", ...relView.split("/"));
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       const content =
         mode.id === "layout"
@@ -223,7 +236,7 @@ export function registerArtisanCommands(
           prompt: "Seeder signature (leave blank to run DatabaseSeeder)",
         });
         if (name === undefined) return;
-        runArtisanInTerminal(name.trim() ? `db:seed --seeder=${name.trim()}` : "db:seed");
+        runArtisanInTerminal(name.trim() ? `db:seed --seeder=${shellQuote(name.trim())}` : "db:seed");
         return;
       }
       const picked = await vscode.window.showQuickPick(
@@ -238,7 +251,7 @@ export function registerArtisanCommands(
         { placeHolder: "Select a seeder to run" }
       );
       if (!picked) return;
-      runArtisanInTerminal(picked.sig ? `db:seed --seeder=${picked.sig}` : "db:seed");
+      runArtisanInTerminal(picked.sig ? `db:seed --seeder=${shellQuote(picked.sig)}` : "db:seed");
     }),
     vscode.commands.registerCommand("goravel.logs.open", async () => {
       const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -261,8 +274,9 @@ export function registerArtisanCommands(
         vscode.window.showErrorMessage("No workspace folder open.");
         return;
       }
+      const isGoFile = Boolean(activeFile && activeFile.endsWith(".go"));
       if (!dir) {
-        dir = activeFile && activeFile.endsWith(".go") ? path.dirname(activeFile) : ws;
+        dir = isGoFile && activeFile ? path.dirname(activeFile) : ws;
       }
       if (testName === undefined) {
         const input = await vscode.window.showInputBox({
@@ -274,13 +288,13 @@ export function registerArtisanCommands(
       }
       const hasEnvTesting = fs.existsSync(path.join(ws, ".env.testing"));
       const rel = path.relative(ws, dir) || ".";
-      const pkg = rel.startsWith(".") ? rel : `./${rel}`;
+      const pkg = rel === "." || rel.startsWith("..") ? rel : `./${rel}`;
       const args = ["test", "-v"];
       if (testName) {
         args.push("-run", testName);
       }
-      args.push(pkg === "." && !activeFile ? "./..." : pkg);
-      const exec = new vscode.ShellExecution("go", args, {
+      args.push(pkg === "." && !isGoFile ? "./..." : pkg);
+      const exec = new vscode.ProcessExecution("go", args, {
         cwd: ws,
         env: hasEnvTesting ? { APP_ENV: "testing" } : undefined,
       });

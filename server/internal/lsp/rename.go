@@ -12,6 +12,57 @@ import (
 	"github.com/rusmanplatd/goravel-lsp/internal/rawsql"
 )
 
+func (s *Server) prepareRename(raw json.RawMessage) any {
+	uri, path, text, _, off, ok := s.resolveInput(raw)
+	if !ok {
+		return nil
+	}
+	cat := s.catalogForPath(path)
+	if tv, vk, _ := framework.TemplateTargetAtOffset(path, text, cat, off); tv != "" || vk != "" {
+		if w, ws, we := identAtOffset(text, off); w != "" {
+			return map[string]any{
+				"range":       Range{offsetToPos(text, ws), offsetToPos(text, we)},
+				"placeholder": w,
+			}
+		}
+	}
+	if strings.HasSuffix(path, ".go") {
+		fi, fa := s.analyzeGo(uri, path, text, cat)
+		if sp := fa.SpanAt(off); sp != nil {
+			switch sp.Kind {
+			case orm.SpanConfigKey, orm.SpanGateAbility, orm.SpanLangKey:
+				return map[string]any{
+					"range":       Range{offsetToPos(text, sp.Start), offsetToPos(text, sp.End)},
+					"placeholder": sp.Text,
+				}
+			case orm.SpanRuleValue, orm.SpanORMWhere, orm.SpanORMColumn, orm.SpanORMOrder, orm.SpanPatchKey:
+				if w, ws, we := identAtOffset(text, off); w != "" {
+					return map[string]any{
+						"range":       Range{offsetToPos(text, ws), offsetToPos(text, we)},
+						"placeholder": w,
+					}
+				}
+			}
+		}
+		if d := fi.DocAt(off); d != nil {
+			if v, vok := d.ToVirtual(off); vok {
+				sc := fi.BuildScope(d, cat)
+				if ref := d.RefAt(v, sc); ref != nil {
+					if g1, ok1 := d.ToGo(ref.VStart); ok1 {
+						if g2, ok2 := d.ToGo(ref.VEnd); ok2 && g2 >= g1 {
+							return map[string]any{
+								"range":       Range{offsetToPos(text, g1), offsetToPos(text, g2)},
+								"placeholder": text[g1:g2],
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Server) rename(raw json.RawMessage) any {
 	var params struct {
 		TextDocument struct {
@@ -108,10 +159,24 @@ func (s *Server) rename(raw json.RawMessage) any {
 						}
 					}
 					for _, r := range d.Refs(sc) {
-						if strings.EqualFold(r.TableAlias, ref.TableAlias) && r.Column == nil {
+						if !strings.EqualFold(r.TableAlias, ref.TableAlias) {
+							continue
+						}
+						if r.Column == nil {
 							if g1, ok1 := d.ToGo(r.VStart); ok1 {
 								if g2, ok2 := d.ToGo(r.VEnd); ok2 {
 									addEdit(uri, text, g1, g2, newName)
+								}
+							}
+						} else if r.VStart > len(ref.TableAlias)+1 {
+							// Update the alias prefix in qualified column references like `u.id`
+							aliasStart := r.VStart - len(ref.TableAlias) - 1
+							aliasEnd := r.VStart - 1
+							if aliasStart >= 0 && aliasEnd < len(d.Text) && d.Text[aliasEnd] == '.' && strings.EqualFold(d.Text[aliasStart:aliasEnd], ref.TableAlias) {
+								if g1, ok1 := d.ToGo(aliasStart); ok1 {
+									if g2, ok2 := d.ToGo(aliasEnd); ok2 {
+										addEdit(uri, text, g1, g2, newName)
+									}
 								}
 							}
 						}
