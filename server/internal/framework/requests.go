@@ -31,13 +31,16 @@ func receiverTypeName(recv *ast.FieldList) string {
 }
 
 func fieldTagKey(f indexer.StructField) string {
-	if len(f.Alt) > 0 && f.Alt[0] != "" {
-		return f.Alt[0]
-	}
 	if f.Col != "" {
 		return f.Col
 	}
-	return indexer.Snake(f.GoName)
+	if s := indexer.Snake(f.GoName); s != "" {
+		return s
+	}
+	if len(f.Alt) > 0 && f.Alt[0] != "" {
+		return f.Alt[0]
+	}
+	return ""
 }
 
 func baseRuleFieldKey(method, key string) string {

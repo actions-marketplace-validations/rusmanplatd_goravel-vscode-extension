@@ -833,7 +833,11 @@ func (fa *FileAnalysis) Completion(goOff int, cat *indexer.Catalog) ([]map[strin
 		return items, true
 
 	case SpanORMRelation:
-		t := resolveRelationChainTable(sp.Table, sp.Text[:goOff-sp.Start], cat)
+		relOff := goOff - sp.Start
+		if relOff < 0 || relOff > len(sp.Text) {
+			return nil, false
+		}
+		t := resolveRelationChainTable(sp.Table, sp.Text[:relOff], cat)
 		if t == nil {
 			return nil, false
 		}
@@ -887,7 +891,11 @@ func (fa *FileAnalysis) Completion(goOff int, cat *indexer.Catalog) ([]map[strin
 		return items, true
 
 	case SpanRuleValue:
-		before := sp.Text[:goOff-sp.Start]
+		relOff := goOff - sp.Start
+		if relOff < 0 || relOff > len(sp.Text) {
+			return nil, false
+		}
+		before := sp.Text[:relOff]
 		seg := before
 		if i := strings.LastIndexByte(before, '|'); i >= 0 {
 			seg = before[i+1:]

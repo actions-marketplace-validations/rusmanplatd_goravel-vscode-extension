@@ -938,6 +938,18 @@ var (
 	htmlRouteAttrPrefixRe     = regexp.MustCompile(`(?i)(?:href|action|hx-get|hx-post|hx-put|hx-delete|hx-patch)\s*=\s*["'](/[^"'{}]*)?$`)
 	jsFetchRoutePrefixRe      = regexp.MustCompile(`(?i)(?:fetch|axios\.(?:get|post|put|patch|delete))\s*\(\s*["'\x60](/[^"'\x60{}]*)?$`)
 	htmlAssetAttrPrefixRe     = regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["'](/[^"'{}]*)?$`)
+	tmplActionRe              = regexp.MustCompile(`(?s)\{\{-?(.*?)-?\}\}`)
+	tmplDefineLeadRe          = regexp.MustCompile(`^\s*define\s+"([^"]+)"`)
+	tmplIncludeLeadRe         = regexp.MustCompile(`^\s*(?:template|block)\s+"([^"]+)"`)
+	tmplDotVarRe              = regexp.MustCompile(`(?:^|[\s(|,=:$])(\$)?\.([A-Za-z_][A-Za-z0-9_]*)`)
+	tmplIdentRe               = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	tmplDefineTrimmedRe       = regexp.MustCompile(`^define\s+"([^"]+)"`)
+	tmplIncludeTrimmedRe      = regexp.MustCompile(`^(template|block)\s+"([^"]+)"(?:\s+(.+))?`)
+	tmplScopeTrimmedRe        = regexp.MustCompile(`^(range|with)\s+(.+)$`)
+	tmplLocalVarTrimmedRe     = regexp.MustCompile(`^(\$[A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(.+)$`)
+	htmlStaticAssetRe         = regexp.MustCompile(`(?i)\b(?:src|href)\s*=\s*["'](/[A-Za-z0-9_./-]+)["']`)
+	tmplIncludeActionStartRe  = regexp.MustCompile(`^\{\{-?\s*(define|template|block)\s+"([^"]+)"`)
+	tmplIncludeAnyActionRe    = regexp.MustCompile(`\{\{-?\s*(?:define|template|block)\s+"([^"]+)"`)
 )
 
 type localTemplateVar struct {
@@ -995,7 +1007,7 @@ func resolveScopedDotGoType(src string, off int, vars []indexer.ViewVar, locals 
 		dotType string
 	}
 	var stack []scopeFrame
-	matches := regexp.MustCompile(`(?s)\{\{-?(.*?)-?\}\}`).FindAllStringSubmatchIndex(src[:off], -1)
+	matches := tmplActionRe.FindAllStringSubmatchIndex(src[:off], -1)
 	for _, m := range matches {
 		body := strings.TrimSpace(src[m[2]:m[3]])
 		if strings.HasPrefix(body, "/*") {
@@ -2227,7 +2239,7 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 	hasKnownCallers := len(vars) > 0 && vi != nil && (len(vi.Callers) > 0 || len(vi.IncludedBy) > 0)
 	reportedVars := map[string]bool{}
 
-	matches := regexp.MustCompile(`(?s)\{\{-?(.*?)-?\}\}`).FindAllStringSubmatchIndex(src, -1)
+	matches := tmplActionRe.FindAllStringSubmatchIndex(src, -1)
 	for _, m := range matches {
 		actStart, actEnd := m[0], m[1]
 		bodyStart, bodyEnd := m[2], m[3]
@@ -2236,7 +2248,7 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 		if strings.HasPrefix(trimmed, "/*") {
 			continue
 		}
-		if dm := regexp.MustCompile(`^\s*define\s+"([^"]+)"`).FindStringSubmatchIndex(body); dm != nil {
+		if dm := tmplDefineLeadRe.FindStringSubmatchIndex(body); dm != nil {
 			nStart, nEnd := bodyStart+dm[2], bodyStart+dm[3]
 			dName := src[nStart:nEnd]
 			localDefines[dName] = true
@@ -2246,7 +2258,7 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 				end   int
 			}{dName, nStart, nEnd})
 		}
-		if im := regexp.MustCompile(`^\s*(?:template|block)\s+"([^"]+)"`).FindStringSubmatchIndex(body); im != nil {
+		if im := tmplIncludeLeadRe.FindStringSubmatchIndex(body); im != nil {
 			nStart, nEnd := bodyStart+im[2], bodyStart+im[3]
 			tName := src[nStart:nEnd]
 			includeSpans = append(includeSpans, struct {
@@ -2288,7 +2300,7 @@ func TemplateDiagnostics(path, src string, cat *indexer.Catalog) []Diag {
 			}
 			isConditionalAction := strings.HasPrefix(trimmed, "if ") || strings.HasPrefix(trimmed, "with ") || strings.Contains(trimmed, "default ")
 			if !isConditionalAction {
-				dotVarMatches := regexp.MustCompile(`(?:^|[\s(|,=:$])(\$)?\.([A-Za-z_][A-Za-z0-9_]*)`).FindAllStringSubmatchIndex(body, -1)
+				dotVarMatches := tmplDotVarRe.FindAllStringSubmatchIndex(body, -1)
 				for _, vm := range dotVarMatches {
 					hasDollar := vm[2] >= 0 && vm[3] > vm[2]
 					if dotRebound && !hasDollar {
@@ -2407,7 +2419,7 @@ func checkTemplateActionFuncs(body string, bodyStart int, cat *indexer.Catalog) 
 		fields := strings.Fields(trimSeg)
 		if len(fields) > 0 {
 			head := fields[0]
-			isIdent := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(head)
+			isIdent := tmplIdentRe.MatchString(head)
 			if isIdent && (segIdx > 0 || len(fields) > 1) && !isKnownKwOrBuiltin(head) {
 				relIdx := strings.Index(seg, head)
 				fnStart := bodyStart + offsetInBody + relIdx
@@ -2805,7 +2817,7 @@ func TemplateDocumentSymbols(path, src string) []DocSymbol {
 		return nil
 	}
 	var symbols []DocSymbol
-	matches := regexp.MustCompile(`(?s)\{\{-?(.*?)-?\}\}`).FindAllStringSubmatchIndex(src, -1)
+	matches := tmplActionRe.FindAllStringSubmatchIndex(src, -1)
 	for _, m := range matches {
 		bStart, bEnd := m[2], m[3]
 		body := strings.TrimSpace(src[bStart:bEnd])
@@ -2814,28 +2826,28 @@ func TemplateDocumentSymbols(path, src string) []DocSymbol {
 		}
 		sLine, sCol := offsetToLineCol(src, m[0])
 		eLine, eCol := offsetToLineCol(src, m[1])
-		if dm := regexp.MustCompile(`^define\s+"([^"]+)"`).FindStringSubmatch(body); dm != nil {
+		if dm := tmplDefineTrimmedRe.FindStringSubmatch(body); dm != nil {
 			symbols = append(symbols, DocSymbol{
 				Name:      "define \"" + dm[1] + "\"",
 				Detail:    "template definition",
 				Kind:      2, // Module
 				StartLine: sLine, StartCol: sCol, EndLine: eLine, EndCol: eCol,
 			})
-		} else if bm := regexp.MustCompile(`^(template|block)\s+"([^"]+)"(?:\s+(.+))?`).FindStringSubmatch(body); bm != nil {
+		} else if bm := tmplIncludeTrimmedRe.FindStringSubmatch(body); bm != nil {
 			symbols = append(symbols, DocSymbol{
 				Name:      bm[1] + " \"" + bm[2] + "\"",
 				Detail:    strings.TrimSpace(bm[3]),
 				Kind:      12, // Function
 				StartLine: sLine, StartCol: sCol, EndLine: eLine, EndCol: eCol,
 			})
-		} else if rm := regexp.MustCompile(`^(range|with)\s+(.+)$`).FindStringSubmatch(body); rm != nil {
+		} else if rm := tmplScopeTrimmedRe.FindStringSubmatch(body); rm != nil {
 			symbols = append(symbols, DocSymbol{
 				Name:      rm[1] + " " + strings.TrimSpace(rm[2]),
 				Detail:    "scope block",
 				Kind:      5, // Class/Namespace
 				StartLine: sLine, StartCol: sCol, EndLine: eLine, EndCol: eCol,
 			})
-		} else if lm := regexp.MustCompile(`^(\$[A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(.+)$`).FindStringSubmatch(body); lm != nil {
+		} else if lm := tmplLocalVarTrimmedRe.FindStringSubmatch(body); lm != nil {
 			symbols = append(symbols, DocSymbol{
 				Name:      lm[1],
 				Detail:    strings.TrimSpace(lm[2]),
@@ -3008,8 +3020,7 @@ func checkStaticAssetLinks(src string, cat *indexer.Catalog) []Diag {
 		".svg": true, ".ico": true, ".webp": true, ".woff": true, ".woff2": true,
 	}
 	var diags []Diag
-	re := regexp.MustCompile(`(?i)\b(?:src|href)\s*=\s*["'](/[A-Za-z0-9_./-]+)["']`)
-	for _, m := range re.FindAllStringSubmatchIndex(src, -1) {
+	for _, m := range htmlStaticAssetRe.FindAllStringSubmatchIndex(src, -1) {
 		pStart, pEnd := m[2], m[3]
 		urlPath := src[pStart:pEnd]
 		ext := strings.ToLower(filepath.Ext(urlPath))
@@ -3076,8 +3087,7 @@ func templateDirectiveSpanAtOffset(src string, off int) (directive, target strin
 		return "", "", 0, 0
 	}
 	act := src[openIdx:closeIdx]
-	re := regexp.MustCompile(`^\{\{-?\s*(define|template|block)\s+"([^"]+)"`)
-	m := re.FindStringSubmatchIndex(act)
+	m := tmplIncludeActionStartRe.FindStringSubmatchIndex(act)
 	if m == nil {
 		return "", "", 0, 0
 	}
@@ -3279,8 +3289,7 @@ func FindViewAndTemplateSpans(fpath, content string, cat *indexer.Catalog, targe
 	if IsTemplateFile(fpath) {
 		if targetViewName != "" && targetVarKey == "" {
 			// Match {{ define "target" }} or {{ template "target" }} or {{ block "target" }}
-			re := regexp.MustCompile(`\{\{-?\s*(?:define|template|block)\s+"([^"]+)"`)
-			for _, m := range re.FindAllStringSubmatchIndex(content, -1) {
+			for _, m := range tmplIncludeAnyActionRe.FindAllStringSubmatchIndex(content, -1) {
 				name := content[m[2]:m[3]]
 				if sameViewName(name, targetViewName, cat) {
 					spans = append(spans, [2]int{m[2], m[3]})
@@ -3404,9 +3413,8 @@ func offsetToLineCol(src string, off int) (int, int) {
 
 func findTemplateVarSpansInContent(src, key string) [][2]int {
 	var spans [][2]int
-	actionRe := regexp.MustCompile(`(?s)\{\{-?(.*?)-?\}\}`)
 	varRe := regexp.MustCompile(`(?:^|[\s(|,=:$])(?:\$)?\.(` + regexp.QuoteMeta(key) + `)\b`)
-	for _, m := range actionRe.FindAllStringSubmatchIndex(src, -1) {
+	for _, m := range tmplActionRe.FindAllStringSubmatchIndex(src, -1) {
 		bStart, bEnd := m[2], m[3]
 		body := src[bStart:bEnd]
 		for _, vm := range varRe.FindAllStringSubmatchIndex(body, -1) {

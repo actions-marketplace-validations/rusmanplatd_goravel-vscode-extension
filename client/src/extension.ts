@@ -18,6 +18,7 @@ import {
 } from "./views/explorers";
 
 let client: LanguageClient | undefined;
+let fileWatcher: vscode.FileSystemWatcher | undefined;
 let statusBar: vscode.StatusBarItem | undefined;
 let customCommands: CommandInfo[] = [];
 let customSeeders: SeederInfo[] = [];
@@ -79,6 +80,10 @@ async function start(ctx: vscode.ExtensionContext) {
     vscode.window.showErrorMessage("goravel-lsp binary not found. Run `npm run build:server` or set goravel.server.path.");
     return;
   }
+  fileWatcher?.dispose();
+  fileWatcher = vscode.workspace.createFileSystemWatcher(
+    "**/{app/models,app/rules,app/console,app/events,app/listeners,app/jobs,app/observers,app/providers,app/grpc,app/http/controllers,app/http/requests,app/http/middleware,bootstrap,config,routes,database/migrations*,database/seeders,resources/views,packages,lang,proto}/**/*"
+  );
   const serverOptions: ServerOptions = { command, args: [] };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
@@ -92,9 +97,7 @@ async function start(ctx: vscode.ExtensionContext) {
       sqlSource: cfg.get<string>("sql.source", "auto"),
     },
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher(
-        "**/{app/models,app/rules,app/console,app/events,app/listeners,app/jobs,app/observers,app/providers,app/grpc,app/http/controllers,app/http/requests,app/http/middleware,bootstrap,config,routes,database/migrations*,database/seeders,resources/views,packages,lang,proto}/**/*"
-      ),
+      fileEvents: fileWatcher,
     },
   };
   client = new LanguageClient("goravel", "Goravel", serverOptions, clientOptions);
@@ -232,9 +235,10 @@ export async function activate(ctx: vscode.ExtensionContext) {
       }
     }),
     vscode.commands.registerCommand("goravel.table.preview", async (node?: { table?: TableInfo }) => {
-      const tname = node?.table?.name;
-      if (!tname) return;
-      await vscode.commands.executeCommand("goravel.previewQuery", `SELECT * FROM ${tname} LIMIT 20`);
+      const tname = node?.table?.name?.trim();
+      if (!tname || /[;\r\n]/.test(tname)) return;
+      const ident = /^[A-Za-z_][A-Za-z0-9_]*$/.test(tname) ? tname : `"${tname.replace(/"/g, '""')}"`;
+      await vscode.commands.executeCommand("goravel.previewQuery", `SELECT * FROM ${ident} LIMIT 20`);
     }),
     vscode.commands.registerCommand(
       "goravel.registerBootstrap",
@@ -349,6 +353,8 @@ export async function activate(ctx: vscode.ExtensionContext) {
 }
 
 export async function deactivate() {
+  fileWatcher?.dispose();
+  fileWatcher = undefined;
   await client?.stop();
 }
 
@@ -357,8 +363,11 @@ function escapeHtml(s: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
+
+const WEBVIEW_CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />`;
 
 function renderQueryPreviewHtml(sql: string, rows: Record<string, unknown>[]): string {
   const cols = rows.length > 0 ? Object.keys(rows[0]) : [];
@@ -378,6 +387,7 @@ function renderQueryPreviewHtml(sql: string, rows: Record<string, unknown>[]): s
   return `<!DOCTYPE html>
 <html>
 <head>
+${WEBVIEW_CSP}
 <style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 12px; }
   pre { background: var(--vscode-textBlockQuote-background); padding: 8px; border-radius: 4px; overflow-x: auto; }
@@ -408,10 +418,10 @@ function renderErDiagramHtml(mermaidSrc: string, tables: TableInfo[]): string {
         )
         .join("");
       const modelBtn = t.loc?.file
-        ? `<button onclick="openFile('${escapeHtml(t.loc.file.replace(/\\/g, "\\\\"))}', ${t.loc.line || 0})">Model (${escapeHtml(t.model || t.name)})</button>`
+        ? `<button class="open-loc-btn" data-file="${escapeHtml(t.loc.file)}" data-line="${t.loc.line || 0}">Model (${escapeHtml(t.model || t.name)})</button>`
         : "";
       const migBtn = t.migLoc?.file
-        ? `<button onclick="openFile('${escapeHtml(t.migLoc.file.replace(/\\/g, "\\\\"))}', ${t.migLoc.line || 0})">Migration</button>`
+        ? `<button class="open-loc-btn" data-file="${escapeHtml(t.migLoc.file)}" data-line="${t.migLoc.line || 0}">Migration</button>`
         : "";
       return `<div class="card">
         <div class="card-header">
@@ -429,6 +439,7 @@ function renderErDiagramHtml(mermaidSrc: string, tables: TableInfo[]): string {
   return `<!DOCTYPE html>
 <html>
 <head>
+${WEBVIEW_CSP}
 <style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; margin-bottom: 20px; }
@@ -448,9 +459,13 @@ function renderErDiagramHtml(mermaidSrc: string, tables: TableInfo[]): string {
   <pre>${escapeHtml(mermaidSrc)}</pre>
   <script>
     const vscode = acquireVsCodeApi();
-    function openFile(file, line) {
-      vscode.postMessage({ type: "open", file, line });
-    }
+    document.addEventListener("click", (e) => {
+      const btn = e.target && e.target.closest ? e.target.closest(".open-loc-btn") : null;
+      if (!btn) return;
+      const file = btn.getAttribute("data-file");
+      const line = Number(btn.getAttribute("data-line") || "0");
+      if (file) vscode.postMessage({ type: "open", file, line });
+    });
   </script>
 </body>
 </html>`;
@@ -461,6 +476,7 @@ function renderRouteMatrixHtml(routes: RouteInfo[]): string {
   return `<!DOCTYPE html>
 <html>
 <head>
+${WEBVIEW_CSP}
 <style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; }
   .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
