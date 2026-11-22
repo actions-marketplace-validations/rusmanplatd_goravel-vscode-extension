@@ -2,6 +2,63 @@
 
 All notable changes to the **Goravel** VS Code extension (`goravel-vscode`) and `goravel-lsp` are documented in this file, organized by git release tag.
 
+## [v0.9.2] - 2026-11-22
+
+### Features
+- Add `--check-templates` / `only-templates` support for validating Go HTML template variables in `goravel-lsp` CLI and GitHub Actions (`action.yml`), plus `modules/` view and route indexing (`281c802`)
+
+### Fixes
+- Escape backslashes in Windows shell quoting and update dependencies (`e191257`)
+
+## [v0.9.1] - 2026-11-16
+
+### Features
+- Add custom brand icon (`media/goravel.svg`) for the Goravel activity bar view container (`e195bb7`)
+
+### Tests
+- Add comprehensive test suite for framework analyzers and workflows (`5747afc`)
+- Remove redundant internal package test files (`a0531da`)
+
+## [v0.9.0] - 2026-11-16
+
+### Features
+- Implement `prepareRename` LSP capability and optimize webview panel lifecycle and route matrix rendering (`84548a6`)
+
+### Performance
+- Add concurrent file checking and document analysis caching in `goravel-lsp` server (`cb2790d`)
+
+### Refactoring
+- Improve SQL parsing, drift analysis, and raw query diagnostics (`ab3cf31`)
+- Improve security, robustness, and stability across client extension and language server (`82fdb0e`)
+
+### Chore
+- Bump extension version to `0.9.0` (`763b685`)
+
+## [v0.8.6] - 2026-11-15
+
+### Features
+- Add configurable SQL schema source options (`auto`, `model`, `live-db`, `both`) for Go models/migrations and live database introspection (`120c469`)
+
+### Chore
+- Remove roadmap and analysis documentation files (`d40e52f`)
+
+## [v0.8.5] - 2026-11-15
+
+### Features
+- Support multi-root workspaces in LSP features and bump extension version to `0.8.5` (`9b0f8c5`)
+- Enhance raw SQL CTE column analysis and template variable error diagnostics (`3efaaff`)
+
+## [v0.8.3] - 2026-11-15
+
+### Chore
+- Update extension description and bump version to `0.8.3` (`192ac05`)
+
+## [v0.8.2] - 2026-11-15
+
+### Documentation
+- Add usage examples and features to `README.md` (`c43a6f4`)
+- Add `CHANGELOG.md` and `README.md` for `goravel-vscode` extension (`705496a`)
+
 ## [v0.8.1] - 2026-11-15
 
 ### Tests & Chore
