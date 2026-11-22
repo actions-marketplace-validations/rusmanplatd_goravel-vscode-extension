@@ -18,15 +18,16 @@ import (
 
 // CheckOptions configures CLI project checking (like golangci-lint run).
 type CheckOptions struct {
-	Root       string
-	OnlySQL    bool
-	ErrorsOnly bool
-	OutFormat  string // "text" | "github-actions"
-	SkipDirs   []string
-	SQLSource  indexer.SQLSource
+	Root          string
+	OnlySQL       bool
+	OnlyTemplates bool
+	ErrorsOnly    bool
+	OutFormat     string // "text" | "github-actions"
+	SkipDirs      []string
+	SQLSource     indexer.SQLSource
 }
 
-// Check prints SQL and Goravel ORM/Config/Validation diagnostics for every Go file in a project (CLI: --check <root>).
+// Check prints SQL and Goravel ORM/Config/Validation/Template diagnostics for every Go and template file in a project (CLI: --check <root>).
 // It returns a non-zero exit code when issues are found.
 func Check(root string) int {
 	return CheckWithOptions(CheckOptions{Root: root})
@@ -36,6 +37,12 @@ func Check(root string) int {
 // It returns a non-zero exit code when issues are found.
 func CheckSQL(root string) int {
 	return CheckWithOptions(CheckOptions{Root: root, OnlySQL: true})
+}
+
+// CheckTemplates prints only Go HTML template (.tmpl/.gohtml) and View() diagnostics for a project (CLI: --check-templates <root>).
+// It returns a non-zero exit code when issues are found.
+func CheckTemplates(root string) int {
+	return CheckWithOptions(CheckOptions{Root: root, OnlyTemplates: true})
 }
 
 // CheckWithOptions runs static analysis with the given CheckOptions and returns an exit code (0 = clean, 1 = issues found).
@@ -80,7 +87,21 @@ func CheckWithOptions(opts CheckOptions) int {
 		issues []checkIssue
 	}
 
+	runAll := !opts.OnlySQL && !opts.OnlyTemplates
+	runSQL := runAll || opts.OnlySQL
+	runTemplates := runAll || opts.OnlyTemplates
+
 	var files []string
+	var tmplFiles []string
+	seenTmpl := map[string]bool{}
+	addTmpl := func(p string) {
+		clean := filepath.Clean(p)
+		if !seenTmpl[clean] {
+			seenTmpl[clean] = true
+			tmplFiles = append(tmplFiles, clean)
+		}
+	}
+
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -88,13 +109,42 @@ func CheckWithOptions(opts CheckOptions) int {
 		if d.IsDir() && skipDirMap[d.Name()] {
 			return filepath.SkipDir
 		}
-		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+		if d.IsDir() {
 			return nil
 		}
-		files = append(files, p)
+		if strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go") {
+			files = append(files, p)
+			return nil
+		}
+		if runTemplates {
+			ext := strings.ToLower(filepath.Ext(p))
+			if ext == ".tmpl" || ext == ".gohtml" {
+				addTmpl(p)
+			}
+		}
 		return nil
 	})
+	if runTemplates {
+		for _, vi := range cat.ViewItems {
+			if vi != nil && vi.Loc.File != "" {
+				if rel, err := filepath.Rel(root, vi.Loc.File); err == nil {
+					skipped := false
+					for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+						if skipDirMap[part] {
+							skipped = true
+							break
+						}
+					}
+					if skipped {
+						continue
+					}
+				}
+				addTmpl(vi.Loc.File)
+			}
+		}
+	}
 	sort.Strings(files)
+	sort.Strings(tmplFiles)
 
 	results := make([]fileResult, len(files))
 	workers := runtime.NumCPU()
@@ -123,35 +173,39 @@ func CheckWithOptions(opts CheckOptions) int {
 				}
 				src := string(b)
 				var res fileResult
-				fi := rawsql.Extract(p, b, sqlCat)
-				res.docs = len(fi.Docs)
-				for _, dg := range rawsql.Analyze(fi, sqlCat) {
-					if dg.Severity > maxSeverity {
-						continue
+				if runSQL {
+					fi := rawsql.Extract(p, b, sqlCat)
+					res.docs = len(fi.Docs)
+					for _, dg := range rawsql.Analyze(fi, sqlCat) {
+						if dg.Severity > maxSeverity {
+							continue
+						}
+						pos := offsetToPos(src, dg.Start)
+						res.issues = append(res.issues, checkIssue{p, pos.Line + 1, pos.Character + 1, dg.Severity, dg.Message})
 					}
-					pos := offsetToPos(src, dg.Start)
-					res.issues = append(res.issues, checkIssue{p, pos.Line + 1, pos.Character + 1, dg.Severity, dg.Message})
-				}
-				fa := orm.AnalyzeFile(p, b, sqlCat)
-				var ormDiags []rawsql.Diag
-				if opts.OnlySQL {
-					ormDiags = fa.SQLDiagnostics(sqlCat)
-				} else {
-					ormDiags = fa.Diagnostics(sqlCat)
-				}
-				for _, dg := range ormDiags {
-					if dg.Severity > maxSeverity {
-						continue
+					fa := orm.AnalyzeFile(p, b, sqlCat)
+					var ormDiags []rawsql.Diag
+					if !runAll {
+						ormDiags = fa.SQLDiagnostics(sqlCat)
+					} else {
+						ormDiags = fa.Diagnostics(sqlCat)
 					}
-					pos := offsetToPos(src, dg.Start)
-					res.issues = append(res.issues, checkIssue{p, pos.Line + 1, pos.Character + 1, dg.Severity, dg.Message})
+					for _, dg := range ormDiags {
+						if dg.Severity > maxSeverity {
+							continue
+						}
+						pos := offsetToPos(src, dg.Start)
+						res.issues = append(res.issues, checkIssue{p, pos.Line + 1, pos.Character + 1, dg.Severity, dg.Message})
+					}
 				}
-				if !opts.OnlySQL {
+				if runAll || runTemplates {
 					var fDiags []framework.Diag
-					fDiags = append(fDiags, framework.RequestDiagnostics(p, src, cat)...)
-					fDiags = append(fDiags, framework.ControllerDiagnostics(p, src, cat)...)
+					if runAll {
+						fDiags = append(fDiags, framework.RequestDiagnostics(p, src, cat)...)
+						fDiags = append(fDiags, framework.ControllerDiagnostics(p, src, cat)...)
+						fDiags = append(fDiags, framework.DriftDiagnostics(p, src, cat)...)
+					}
 					fDiags = append(fDiags, framework.ViewDiagnostics(p, src, cat)...)
-					fDiags = append(fDiags, framework.DriftDiagnostics(p, src, cat)...)
 					for _, dg := range fDiags {
 						if dg.Severity > maxSeverity {
 							continue
@@ -165,6 +219,47 @@ func CheckWithOptions(opts CheckOptions) int {
 		}()
 	}
 	wg.Wait()
+
+	tmplResults := make([]fileResult, len(tmplFiles))
+	if runTemplates && len(tmplFiles) > 0 {
+		tWorkers := runtime.NumCPU()
+		if tWorkers < 1 {
+			tWorkers = 1
+		}
+		if tWorkers > len(tmplFiles) {
+			tWorkers = len(tmplFiles)
+		}
+		tJobs := make(chan int, len(tmplFiles))
+		for i := range tmplFiles {
+			tJobs <- i
+		}
+		close(tJobs)
+		var twg sync.WaitGroup
+		for w := 0; w < tWorkers; w++ {
+			twg.Add(1)
+			go func() {
+				defer twg.Done()
+				for idx := range tJobs {
+					p := tmplFiles[idx]
+					b, err := os.ReadFile(p)
+					if err != nil {
+						continue
+					}
+					src := string(b)
+					var res fileResult
+					for _, dg := range framework.TemplateDiagnostics(p, src, cat) {
+						if dg.Severity > maxSeverity {
+							continue
+						}
+						pos := offsetToPos(src, dg.Start)
+						res.issues = append(res.issues, checkIssue{p, pos.Line + 1, pos.Character + 1, dg.Severity, dg.Message})
+					}
+					tmplResults[idx] = res
+				}
+			}()
+		}
+		twg.Wait()
+	}
 
 	docs, issues := 0, 0
 	emit := func(it checkIssue) {
@@ -189,8 +284,13 @@ func CheckWithOptions(opts CheckOptions) int {
 			emit(it)
 		}
 	}
-	fmt.Printf("%d sql docs, %d tables, %d routes, %d configs, %d rules, %d issues\n",
-		docs, len(sqlCat.Tables), len(cat.Routes), len(cat.Configs), len(cat.Rules), issues)
+	for _, res := range tmplResults {
+		for _, it := range res.issues {
+			emit(it)
+		}
+	}
+	fmt.Printf("%d sql docs, %d tables, %d routes, %d configs, %d rules, %d templates, %d issues\n",
+		docs, len(sqlCat.Tables), len(cat.Routes), len(cat.Configs), len(cat.Rules), len(tmplFiles), issues)
 	if issues > 0 {
 		return 1
 	}

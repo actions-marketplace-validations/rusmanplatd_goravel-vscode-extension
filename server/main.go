@@ -61,10 +61,11 @@ func main() {
 			fmt.Printf("\nSummary: %d tables, %d routes, %d configs, %d rules, %d migrations\n",
 				len(cat.Tables), len(cat.Routes), len(cat.Configs), len(cat.Rules), len(cat.Migrations))
 			return
-		case "run", "check", "--check", "--check-sql":
+		case "run", "check", "--check", "--check-sql", "--check-templates":
 			opts := lsp.CheckOptions{
-				Root:    ".",
-				OnlySQL: cmd == "--check-sql",
+				Root:          ".",
+				OnlySQL:       cmd == "--check-sql",
+				OnlyTemplates: cmd == "--check-templates",
 			}
 			args := os.Args[2:]
 			for i := 0; i < len(args); i++ {
@@ -77,8 +78,11 @@ func main() {
 				switch {
 				case arg == "--only-sql" || arg == "--sql" || arg == "--check-sql":
 					opts.OnlySQL = true
+				case arg == "--only-templates" || arg == "--templates" || arg == "--check-templates":
+					opts.OnlyTemplates = true
 				case arg == "--all":
 					opts.OnlySQL = false
+					opts.OnlyTemplates = false
 				case arg == "--errors-only":
 					opts.ErrorsOnly = true
 				case strings.HasPrefix(arg, "--out-format="):
