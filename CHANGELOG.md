@@ -2,6 +2,34 @@
 
 All notable changes to the **Goravel** VS Code extension (`goravel-vscode`) and `goravel-lsp` are documented in this file, organized by git release tag.
 
+## [v1.0.0] - 2026-11-22
+
+First stable release of **Goravel** (`goravel-vscode`) and `goravel-lsp`, hardened with full-stack automated test coverage, static analysis, race detection, and CI release gating.
+
+### Fixes
+- Prevent `sync.RWMutex` lock copying in `Catalog.ForSQL` (`go vet copylocks`) and guard against panics on short `type` declarations during workspace indexing (`afb83a3`)
+- Fix subquery alias detection (`isFalseAliasKeywordMatch`) and add bounds clamping in raw SQL completion and context helpers (`afb83a3`)
+- Fix malformed markdown backticks in `facades.View` completion documentation (`afb83a3`)
+- Fix `goravel.registerBootstrap` response handling when the server writes `bootstrap/*.go` directly and clear the language client reference on `deactivate()` (`afb83a3`)
+- Clean up temporary download directories when `install.sh` falls back to building from source (`afb83a3`)
+- Preserve explicit `--all` flag in `action.yml` instead of overriding it with the default `only-sql: "true"` input (`afb83a3`)
+
+### Tests
+- Expand Go backend test coverage across `server/main.go`, `indexer`, `rawsql`, `orm`, `framework`, and `lsp` (from 31.4% to 83.2% total statements) with race detection and Go fuzz tests for SQL and template parsers (`afb83a3`)
+- Add TypeScript client test suite covering `extension.ts`, `commands/artisan.ts`, `views/explorers.ts` (98.6% line coverage), and `package.json`/grammar/snippet consistency (`afb83a3`)
+- Add isolated offline tests for `install.sh` and `action.yml`, including end-to-end CLI validation (`afb83a3`)
+
+### CI/CD
+- Gate `.github/workflows/publish.yml` and pull requests with `go vet`, Go tests, Go `-race` tests, TypeScript type checking, client tests, script tests, production build, and VSIX packaging validation (`afb83a3`)
+- Add unified `npm test`, coverage, race, vet, and packaging scripts in `package.json` and exclude test artifacts in `.vscodeignore` (`afb83a3`)
+
+### Refactoring & Documentation
+- Extract testable `runCLI` and error-returning `parseSQLSourceFlag` in `server/main.go` and support configurable `Stdout` in `lsp.CheckOptions` (`afb83a3`)
+- Update `README.md` with local testing, coverage, fuzzing, and packaging commands (`afb83a3`)
+
+### Chore
+- Bump extension version to `1.0.0`
+
 ## [v0.9.2] - 2026-11-22
 
 ### Features
