@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ type CheckOptions struct {
 	OutFormat     string // "text" | "github-actions"
 	SkipDirs      []string
 	SQLSource     indexer.SQLSource
+	Stdout        io.Writer // defaults to os.Stdout when nil
 }
 
 // Check prints SQL and Goravel ORM/Config/Validation/Template diagnostics for every Go and template file in a project (CLI: --check <root>).
@@ -261,6 +263,10 @@ func CheckWithOptions(opts CheckOptions) int {
 		twg.Wait()
 	}
 
+	out := opts.Stdout
+	if out == nil {
+		out = os.Stdout
+	}
 	docs, issues := 0, 0
 	emit := func(it checkIssue) {
 		rel := it.file
@@ -272,9 +278,9 @@ func CheckWithOptions(opts CheckOptions) int {
 			if it.sev > 1 {
 				level = "warning"
 			}
-			fmt.Printf("::%s file=%s,line=%d,col=%d::%s\n", level, rel, it.line, it.col, it.msg)
+			fmt.Fprintf(out, "::%s file=%s,line=%d,col=%d::%s\n", level, rel, it.line, it.col, it.msg)
 		} else {
-			fmt.Printf("%s:%d:%d: %s\n", it.file, it.line, it.col, it.msg)
+			fmt.Fprintf(out, "%s:%d:%d: %s\n", it.file, it.line, it.col, it.msg)
 		}
 		issues++
 	}
@@ -289,7 +295,7 @@ func CheckWithOptions(opts CheckOptions) int {
 			emit(it)
 		}
 	}
-	fmt.Printf("%d sql docs, %d tables, %d routes, %d configs, %d rules, %d templates, %d issues\n",
+	fmt.Fprintf(out, "%d sql docs, %d tables, %d routes, %d configs, %d rules, %d templates, %d issues\n",
 		docs, len(sqlCat.Tables), len(cat.Routes), len(cat.Configs), len(cat.Rules), len(tmplFiles), issues)
 	if issues > 0 {
 		return 1

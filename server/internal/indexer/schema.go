@@ -740,10 +740,42 @@ func (c *Catalog) ForSQL(source SQLSource) *Catalog {
 		return c
 	}
 	wantLive := eff == SQLSourceLiveDB
-	clone := *c
-	clone.mu = sync.RWMutex{}
-	clone.Tables = make(map[string]*Table, len(c.Tables))
-	clone.Models = make(map[string]*Table, len(c.Models))
+	clone := &Catalog{
+		Root:               c.Root,
+		LiveDBConnected:    c.LiveDBConnected,
+		Tables:             make(map[string]*Table, len(c.Tables)),
+		Models:             make(map[string]*Table, len(c.Models)),
+		TableConsts:        c.TableConsts,
+		DBFunctions:        c.DBFunctions,
+		Structs:            c.Structs,
+		Configs:            c.Configs,
+		EnvVars:            c.EnvVars,
+		Routes:             c.Routes,
+		Rules:              c.Rules,
+		Migrations:         c.Migrations,
+		Commands:           c.Commands,
+		Controllers:        c.Controllers,
+		Views:              c.Views,
+		ViewItems:          c.ViewItems,
+		ViewVars:           c.ViewVars,
+		SharedViewVars:     c.SharedViewVars,
+		TemplateFuncs:      c.TemplateFuncs,
+		FuncReturns:        c.FuncReturns,
+		PackageViewDirs:    c.PackageViewDirs,
+		Middleware:         c.Middleware,
+		Seeders:            c.Seeders,
+		Schedules:          c.Schedules,
+		Translations:       c.Translations,
+		Gates:              c.Gates,
+		Events:             c.Events,
+		Listeners:          c.Listeners,
+		Jobs:               c.Jobs,
+		Observers:          c.Observers,
+		Scopes:             c.Scopes,
+		ProtoMethods:       c.ProtoMethods,
+		Unregistered:       c.Unregistered,
+		UnregisteredByFile: c.UnregisteredByFile,
+	}
 	for k, t := range c.Tables {
 		if wantLive && !t.FromLiveDB {
 			continue
@@ -769,7 +801,7 @@ func (c *Catalog) ForSQL(source SQLSource) *Catalog {
 			clone.Models[nt.Model] = &nt
 		}
 	}
-	return &clone
+	return clone
 }
 
 // Build indexes the project at root.

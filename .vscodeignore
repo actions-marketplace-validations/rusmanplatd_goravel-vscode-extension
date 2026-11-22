@@ -1,9 +1,12 @@
 server/
 docs/
 client/
+tests/
+.test-out/
 **/*.map
 node_modules/
 tsconfig.json
+tsconfig.test.json
 **/*.vsix
 dist/releases/
 action.yml

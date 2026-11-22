@@ -291,11 +291,23 @@ npm install
 # Build Go LSP server (outputs to bin/goravel-lsp) and bundle TS client
 npm run build
 
-# Run Go server tests and TypeScript typecheck
-npm run test:server
-npm run typecheck
+# Run the complete test suite (Go server, TypeScript client, config/resources, install.sh & action.yml)
+npm test
 
-# Package .vsix into dist/
+# Run individual test and quality-check commands
+npm run test:server        # Go unit & integration tests
+npm run test:server:race   # Go tests with race detector
+npm run test:server:cover  # Go tests with coverage summary
+npm run vet:server         # Go static analysis (go vet)
+npm run test:client        # TypeScript client & extension resource tests
+npm run test:client:cover  # TypeScript client tests with V8 coverage
+npm run test:scripts       # install.sh & action.yml automated tests
+npm run typecheck          # TypeScript strict type checking (src + test)
+
+# Run Go fuzz tests (optional)
+cd server && go test -run=^$ -fuzz=FuzzCheckSQLSyntax -fuzztime=10s ./internal/rawsql
+
+# Package .vsix into dist/ (runs typecheck, go vet, race tests, client & script tests)
 npm run package
 ```
 

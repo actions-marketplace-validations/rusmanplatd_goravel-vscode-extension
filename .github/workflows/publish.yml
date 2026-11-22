@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -27,18 +28,37 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
+      - name: Go static analysis (go vet)
+        run: npm run vet:server
+
+      - name: Run Go tests
+        run: npm run test:server
+
+      - name: Run Go tests (race detector)
+        run: npm run test:server:race
+
+      - name: TypeScript typecheck
         run: npm run typecheck
 
-      - name: Build client bundle
-        run: npm run build:client
+      - name: Run TypeScript client & config tests
+        run: npm run test:client
 
-      - name: Test server (race detector)
-        run: cd server && go test -race -count=1 ./...
+      - name: Run installer & GitHub Action tests
+        run: npm run test:scripts
+
+      - name: Build server and client bundle
+        run: npm run build
+
+      - name: Validate VSIX packaging
+        run: |
+          mkdir -p dist
+          npx vsce package --no-dependencies --out dist/
+          ls -lh dist/goravel-vscode-*.vsix
 
   publish:
     name: Publish (VS Code Marketplace, Open VSX, GitHub Release / Marketplace Action)
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -242,7 +242,7 @@ func ViewCompletions(path, src string, cat *indexer.Catalog, goOff int) []CompIt
 							detail += " (package view)"
 						}
 						if len(vi.UsedVars) > 0 {
-							doc = "Variables: `." + strings.Join(vi.UsedVars, "`, `.`") + "`"
+							doc = "Variables: `." + strings.Join(vi.UsedVars, "`, `.") + "`"
 						}
 					}
 					out = append(out, CompItem{

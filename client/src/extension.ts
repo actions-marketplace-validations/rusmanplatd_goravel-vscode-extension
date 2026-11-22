@@ -254,31 +254,34 @@ export async function activate(ctx: vscode.ExtensionContext) {
           ok: boolean;
           title?: string;
           error?: string;
+          targetFile?: string;
           edit?: { changes?: Record<string, { range: { start: { line: number; character: number }; end: { line: number; character: number } }; newText: string }[]> };
         }>("goravel/registerBootstrap", { file });
-        if (!res?.ok || !res.edit?.changes) {
+        if (!res?.ok) {
           vscode.window.showWarningMessage(res?.error || "Could not auto-register component in bootstrap/.");
           return;
         }
-        const wsEdit = new vscode.WorkspaceEdit();
-        for (const [uriStr, edits] of Object.entries(res.edit.changes)) {
-          const uri = vscode.Uri.parse(uriStr);
-          for (const e of edits) {
-            wsEdit.replace(
-              uri,
-              new vscode.Range(
-                new vscode.Position(e.range.start.line, e.range.start.character),
-                new vscode.Position(e.range.end.line, e.range.end.character)
-              ),
-              e.newText
-            );
+        if (res.edit?.changes) {
+          const wsEdit = new vscode.WorkspaceEdit();
+          for (const [uriStr, edits] of Object.entries(res.edit.changes)) {
+            const uri = vscode.Uri.parse(uriStr);
+            for (const e of edits) {
+              wsEdit.replace(
+                uri,
+                new vscode.Range(
+                  new vscode.Position(e.range.start.line, e.range.start.character),
+                  new vscode.Position(e.range.end.line, e.range.end.character)
+                ),
+                e.newText
+              );
+            }
           }
-        }
-        await vscode.workspace.applyEdit(wsEdit);
-        // Save modified bootstrap files so re-index picks it up immediately
-        for (const uriStr of Object.keys(res.edit.changes)) {
-          const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(uriStr));
-          await doc.save();
+          await vscode.workspace.applyEdit(wsEdit);
+          // Save modified bootstrap files so re-index picks it up immediately
+          for (const uriStr of Object.keys(res.edit.changes)) {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(uriStr));
+            await doc.save();
+          }
         }
         vscode.window.showInformationMessage(res.title || "Registered component in bootstrap/.");
         await refreshOverview();
@@ -391,7 +394,9 @@ export async function deactivate() {
   }
   fileWatcher?.dispose();
   fileWatcher = undefined;
-  await client?.stop();
+  const activeClient = client;
+  client = undefined;
+  await activeClient?.stop();
 }
 
 function escapeHtml(s: string): string {

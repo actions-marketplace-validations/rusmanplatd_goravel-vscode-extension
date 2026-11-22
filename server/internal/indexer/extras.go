@@ -1681,9 +1681,7 @@ func firstExportedStructAndPkg(fileSrc string) (structName, pkgName string) {
 		}
 		if strings.HasPrefix(line, "type ") && structName == "" {
 			fields := strings.Fields(line)
-			if len(fields) >= 3 && fields[2] == "struct" || (len(fields) >= 2 && strings.HasSuffix(fields[2], "struct{}") || strings.HasPrefix(fields[2], "struct{")) {
-				structName = fields[1]
-			} else if len(fields) >= 3 && strings.HasPrefix(fields[2], "struct") {
+			if len(fields) >= 3 && (fields[2] == "struct" || strings.HasPrefix(fields[2], "struct{")) {
 				structName = fields[1]
 			}
 		}

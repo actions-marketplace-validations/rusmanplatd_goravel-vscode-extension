@@ -198,6 +198,7 @@ if [ -n "$TAG" ] && [ "$TAG" != "main" ] && [ "$TAG" != "source" ]; then
     log_info "installed ${BINDIR}/${BINARY}${ext} (${TAG})"
     exit 0
   else
+    rm -rf "$tmpdir"
     log_info "prebuilt binary for ${TAG} (${OS}/${ARCH}) not found in release; falling back to source build"
   fi
 fi

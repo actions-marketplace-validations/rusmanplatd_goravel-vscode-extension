@@ -76,6 +76,8 @@ runs:
           else
             EXTRA_FLAGS="$EXTRA_FLAGS --only-templates"
           fi
+        elif [[ " $CMD_ARGS " == *" --all "* ]]; then
+          :
         elif [[ " $CMD_ARGS " == *" --check-templates "* || " $CMD_ARGS " == *" --only-templates "* || " $CMD_ARGS " == *" --templates "* ]]; then
           if [[ " $CMD_ARGS " == *" --check-sql "* || " $CMD_ARGS " == *" --only-sql "* ]]; then
             EXTRA_FLAGS="$EXTRA_FLAGS --only-sql"
