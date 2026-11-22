@@ -1,5 +1,5 @@
 name: "goravel-lsp"
-description: "Run goravel-lsp static SQL & Goravel ORM/Framework checker in GitHub Actions (like golangci-lint)"
+description: "Run goravel-lsp static SQL, Go HTML template variable, and Goravel ORM/Framework checker in GitHub Actions (like golangci-lint)"
 author: "rusmanplatd"
 branding:
   icon: "database"
@@ -15,13 +15,17 @@ inputs:
     required: false
     default: "."
   args:
-    description: "Command line arguments for goravel-lsp (default: '--check-sql')"
+    description: "Command line arguments for goravel-lsp (default: '--check-sql', e.g. '--check-templates' or '--check-sql --check-templates')"
     required: false
     default: "--check-sql"
   only-sql:
     description: "Check only SQL and ORM database queries (skip non-SQL framework diagnostics)"
     required: false
     default: "true"
+  only-templates:
+    description: "Check only Go HTML templates (.tmpl/.gohtml) and view variable references"
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -60,11 +64,27 @@ runs:
       env:
         INPUT_ARGS: ${{ inputs.args }}
         INPUT_ONLY_SQL: ${{ inputs.only-sql }}
+        INPUT_ONLY_TEMPLATES: ${{ inputs.only-templates }}
       run: |
         set -euo pipefail
+        CMD_ARGS="$INPUT_ARGS"
         EXTRA_FLAGS="--out-format=github-actions"
-        if [ "$INPUT_ONLY_SQL" = "true" ]; then
+
+        if [ "$INPUT_ONLY_TEMPLATES" = "true" ]; then
+          if [ "$CMD_ARGS" = "--check-sql" ]; then
+            CMD_ARGS="--check-templates"
+          else
+            EXTRA_FLAGS="$EXTRA_FLAGS --only-templates"
+          fi
+        elif [[ " $CMD_ARGS " == *" --all "* ]]; then
+          :
+        elif [[ " $CMD_ARGS " == *" --check-templates "* || " $CMD_ARGS " == *" --only-templates "* || " $CMD_ARGS " == *" --templates "* ]]; then
+          if [[ " $CMD_ARGS " == *" --check-sql "* || " $CMD_ARGS " == *" --only-sql "* ]]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --only-sql"
+          fi
+        elif [ "$INPUT_ONLY_SQL" = "true" ]; then
           EXTRA_FLAGS="$EXTRA_FLAGS --only-sql"
         fi
-        goravel-lsp $INPUT_ARGS $EXTRA_FLAGS .
+
+        goravel-lsp $CMD_ARGS $EXTRA_FLAGS .
 

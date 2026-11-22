@@ -120,6 +120,90 @@ func TestCheck_Negative_NonexistentRootDoesNotPanic(t *testing.T) {
 	_ = CheckWithOptions(CheckOptions{Root: "/nonexistent/goravel/root"})
 }
 
+// ---------- templates ----------
+
+func TestCheck_Positive_ValidTemplateVarsClean(t *testing.T) {
+	root := project(t, map[string]string{
+		"resources/views/welcome.tmpl":        "{{ define \"welcome.tmpl\" }}{{ template \"layouts/header.tmpl\" . }}<h1>{{ .title }}</h1>{{ end }}",
+		"resources/views/layouts/header.tmpl": "{{ define \"layouts/header.tmpl\" }}<title>{{ .app_name }}</title>{{ end }}",
+		"routes/web.go": `package routes
+
+func Web(ctx http.Context) {
+	_ = ctx.Response().View().Make("welcome.tmpl", map[string]any{
+		"title":    "Hello",
+		"app_name": "Goravel",
+	})
+}
+`,
+	})
+	if code := CheckWithOptions(CheckOptions{Root: root, OnlyTemplates: true}); code != 0 {
+		t.Errorf("valid template variables should exit 0, got %d", code)
+	}
+}
+
+func TestCheck_Positive_ModuleRoutePassesTemplateVars(t *testing.T) {
+	root := project(t, map[string]string{
+		"resources/views/auth/signin.tmpl": "{{ define \"auth/signin.tmpl\" }}{{ .supabase_url }}{{ end }}",
+		"modules/pusat/routes/web.go": `package routes
+
+func Web(ctx http.Context) {
+	_ = ctx.Response().View().Make("auth/signin.tmpl", map[string]any{
+		"supabase_url": "https://example.supabase.co",
+	})
+}
+`,
+	})
+	if code := CheckWithOptions(CheckOptions{Root: root, OnlyTemplates: true}); code != 0 {
+		t.Errorf("module route view variables should be indexed and exit 0, got %d", code)
+	}
+}
+
+func TestCheck_Positive_NonTemplatePublicHTMLIgnored(t *testing.T) {
+	root := project(t, map[string]string{
+		"public/index.html": "<div>{{ .not_a_go_template }}</div>",
+	})
+	if code := CheckWithOptions(CheckOptions{Root: root, OnlyTemplates: true}); code != 0 {
+		t.Errorf("public/*.html outside views should not be checked as templates, got %d", code)
+	}
+}
+
+func TestCheck_Negative_UnknownTemplateVariableFails(t *testing.T) {
+	root := project(t, map[string]string{
+		"resources/views/welcome.tmpl": "{{ define \"welcome.tmpl\" }}<h1>{{ .missing_var }}</h1>{{ end }}",
+		"routes/web.go": `package routes
+
+func Web(ctx http.Context) {
+	_ = ctx.Response().View().Make("welcome.tmpl", map[string]any{
+		"title": "Hello",
+	})
+}
+`,
+	})
+	if code := CheckWithOptions(CheckOptions{Root: root, OnlyTemplates: true}); code != 1 {
+		t.Errorf("unknown template variable should exit 1 with OnlyTemplates, got %d", code)
+	}
+	if code := CheckWithOptions(CheckOptions{Root: root}); code != 1 {
+		t.Errorf("unknown template variable should exit 1 in full check, got %d", code)
+	}
+	if code := CheckWithOptions(CheckOptions{Root: root, OnlySQL: true}); code != 0 {
+		t.Errorf("OnlySQL should ignore template diagnostics, got %d", code)
+	}
+	if code := CheckWithOptions(CheckOptions{Root: root, OnlySQL: true, OnlyTemplates: true}); code != 1 {
+		t.Errorf("OnlySQL + OnlyTemplates should catch template variable errors, got %d", code)
+	}
+}
+
+func TestCheck_Negative_OnlyTemplatesIgnoresConfigIssues(t *testing.T) {
+	root := project(t, map[string]string{
+		"config/jwt.go":                configGo,
+		"app/repositories/r.go":        repo(`_ = facades.Config().GetString("jwt.nope")`),
+		"resources/views/welcome.tmpl": "{{ define \"welcome.tmpl\" }}<p>ok</p>{{ end }}",
+	})
+	if code := CheckWithOptions(CheckOptions{Root: root, OnlyTemplates: true}); code != 0 {
+		t.Errorf("OnlyTemplates should ignore config diagnostics, got %d", code)
+	}
+}
+
 // ---------- helper functions ----------
 
 func TestRuleNameAt(t *testing.T) {

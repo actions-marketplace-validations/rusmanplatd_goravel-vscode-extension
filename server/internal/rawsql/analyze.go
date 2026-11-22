@@ -57,7 +57,7 @@ func isFalseAliasKeywordMatch(cleanSQL string, matchStart int) bool {
 							return true
 						}
 					}
-					break
+					return false
 				}
 			}
 		}
@@ -302,6 +302,11 @@ func (d *Doc) CheckWithCatalog(sc Scope, cat *indexer.Catalog) []Issue {
 }
 
 func isFilterContext(sql string, pos int) bool {
+	if pos < 0 {
+		pos = 0
+	} else if pos > len(sql) {
+		pos = len(sql)
+	}
 	up := strings.ToUpper(sql[:pos])
 	lastWhere := strings.LastIndex(up, "WHERE")
 	lastOn := strings.LastIndex(up, " ON ")
@@ -487,6 +492,11 @@ func resolveOutCol(oc *OutCol, sc Scope) (*indexer.Table, *indexer.Column) {
 }
 
 func isAliasUsageContext(sql string, pos int) bool {
+	if pos < 0 {
+		pos = 0
+	} else if pos > len(sql) {
+		pos = len(sql)
+	}
 	up := strings.ToUpper(sql[:pos])
 	lastOrder := strings.LastIndex(up, "ORDER BY")
 	lastGroup := strings.LastIndex(up, "GROUP BY")
@@ -530,6 +540,11 @@ var (
 )
 
 func (d *Doc) CompletionAt(v int) CompletionCtx {
+	if v < 0 {
+		v = 0
+	} else if v > len(d.Text) {
+		v = len(d.Text)
+	}
 	before := d.Text[:v]
 	if m := qualRe.FindStringSubmatch(before); m != nil {
 		return CompletionCtx{Qualifier: strings.ToLower(m[1]), Prefix: m[2]}

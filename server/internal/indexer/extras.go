@@ -23,9 +23,9 @@ var (
 )
 
 func indexViews(c *Catalog, root string) {
-	// 1. Collect Go files across config, app, bootstrap, packages, routes, and tests
+	// 1. Collect Go files across config, app, bootstrap, packages, modules, routes, and tests
 	var files []*parsedFile
-	for _, sub := range []string{"config", "app", "bootstrap", "packages", "routes", "tests"} {
+	for _, sub := range []string{"config", "app", "bootstrap", "packages", "modules", "routes", "tests"} {
 		files = append(files, walkGoFiles(filepath.Join(root, sub))...)
 	}
 
@@ -76,7 +76,7 @@ func indexViews(c *Catalog, root string) {
 		}
 	}
 
-	// 3. Walk app views (resources/views) first, then package view directories
+	// 3. Walk app views (resources/views) first, then package and module view directories
 	appViewDir := filepath.Join(root, "resources", "views")
 	walkAndIndexViewDir(c, root, appViewDir, "app")
 	for _, pkgDir := range c.PackageViewDirs {
@@ -84,6 +84,17 @@ func indexViews(c *Catalog, root string) {
 			continue
 		}
 		walkAndIndexViewDir(c, root, pkgDir, "package")
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "modules")); err == nil {
+		for _, ent := range entries {
+			if !ent.IsDir() {
+				continue
+			}
+			modViewDir := filepath.Join(root, "modules", ent.Name(), "resources", "views")
+			if st, err := os.Stat(modViewDir); err == nil && st.IsDir() {
+				walkAndIndexViewDirWithPrefix(c, root, modViewDir, "package", ent.Name())
+			}
+		}
 	}
 
 	// 4. Index View().Make, View().First, View().Exists, View().Share, and path.View across Go files
@@ -262,6 +273,10 @@ func indexViews(c *Catalog, root string) {
 }
 
 func walkAndIndexViewDir(c *Catalog, root, viewDir, source string) {
+	walkAndIndexViewDirWithPrefix(c, root, viewDir, source, "")
+}
+
+func walkAndIndexViewDirWithPrefix(c *Catalog, root, viewDir, source, prefix string) {
 	_ = filepath.WalkDir(viewDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -275,6 +290,9 @@ func walkAndIndexViewDir(c *Catalog, root, viewDir, source string) {
 			return nil
 		}
 		relSlash := filepath.ToSlash(rel)
+		if prefix != "" {
+			relSlash = prefix + "/" + relSlash
+		}
 		relRoot := relSlash
 		if r, err := filepath.Rel(root, p); err == nil {
 			relRoot = filepath.ToSlash(r)
@@ -1663,9 +1681,7 @@ func firstExportedStructAndPkg(fileSrc string) (structName, pkgName string) {
 		}
 		if strings.HasPrefix(line, "type ") && structName == "" {
 			fields := strings.Fields(line)
-			if len(fields) >= 3 && fields[2] == "struct" || (len(fields) >= 2 && strings.HasSuffix(fields[2], "struct{}") || strings.HasPrefix(fields[2], "struct{")) {
-				structName = fields[1]
-			} else if len(fields) >= 3 && strings.HasPrefix(fields[2], "struct") {
+			if len(fields) >= 3 && (fields[2] == "struct" || strings.HasPrefix(fields[2], "struct{")) {
 				structName = fields[1]
 			}
 		}

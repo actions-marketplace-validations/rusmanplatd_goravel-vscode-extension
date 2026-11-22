@@ -53,12 +53,14 @@ Or run it directly against a Goravel project:
 
 ```bash
 goravel-lsp --check-sql .
+goravel-lsp --check-templates .
 goravel-lsp --dump .
 ```
 
-Available CLI flags for `run` / `check` / `--check` / `--check-sql`:
+Available CLI flags for `run` / `check` / `--check` / `--check-sql` / `--check-templates`:
 - `--only-sql` / `--sql` / `--check-sql` — Check only SQL and ORM database queries
-- `--all` — Run all diagnostics
+- `--only-templates` / `--templates` / `--check-templates` — Check only Go HTML templates (`.tmpl` / `.gohtml`) and `View()` variable references
+- `--all` — Run all diagnostics (SQL, ORM, framework, and templates)
 - `--errors-only` — Report errors only
 - `--sql-source=<auto|model|live-db|both>` — Schema source for the SQL checker (`model` = Go models/migrations, `live-db` = live DB introspection via `.env` `DB_*`, `both` = merged, `auto` = follows `GORAVEL_LIVE_DB=1`)
 - `--live-db` — Shorthand for `--sql-source=live-db`
@@ -66,15 +68,16 @@ Available CLI flags for `run` / `check` / `--check` / `--check-sql`:
 - `--skip-dirs=dir1,dir2` — Comma-separated directories to skip
 
 ### GitHub Action
-Use `goravel-lsp` in CI workflows via [`action.yml`](action.yml) to lint SQL and Goravel ORM queries:
+Use `goravel-lsp` in CI workflows via [`action.yml`](action.yml) to lint SQL, Goravel ORM queries, and Go HTML template variables:
 
 ```yaml
 - uses: rusmanplatd/goravel-vscode-extension@v0.8.1
   with:
     version: "v0.8.1"        # 'latest', tag (e.g. 'v0.8.1'), or 'main'
     working-directory: "."
-    args: "--check-sql"
+    args: "--check-sql"      # or '--check-templates', '--check-sql --check-templates', '--check --all'
     only-sql: "true"
+    only-templates: "false"
 ```
 
 ## Examples
@@ -179,7 +182,13 @@ goravel-lsp --check-sql --sql-source=model .
 # Check SQL queries against live database introspection (.env DB_* settings)
 goravel-lsp --check-sql --sql-source=live-db .
 
-# Check everything (SQL, ORM, routes, configs, views) and report errors only
+# Check only Go HTML template variables, syntax, includes, and View() calls
+goravel-lsp --check-templates .
+
+# Check both SQL and templates together (errors only)
+goravel-lsp check --only-sql --only-templates --errors-only .
+
+# Check everything (SQL, ORM, routes, configs, views, templates) and report errors only
 goravel-lsp check --all --errors-only .
 
 # Skip specific directories
@@ -225,6 +234,33 @@ If your CI job runs a database service container (e.g., PostgreSQL/MySQL) with m
           only-sql: "true"
 ```
 
+To validate Go HTML template variables (`.var` references against `View().Make(...)` / `View().First(...)` / `View().Share(...)` data), template syntax, and included partials in CI, set `only-templates: "true"` (or `args: "--check-templates"`):
+
+```yaml
+name: Template Check (goravel-lsp)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  template-check:
+    name: Check Template Variables & Views
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: rusmanplatd/goravel-vscode-extension@master
+        with:
+          version: latest
+          args: "--check-templates"
+          only-templates: "true"
+```
+
+You can also validate both SQL and template variables in a single step by passing `args: "--check-sql --check-templates"`.
+
 ### 7. Docker / Custom Artisan Command Setting
 
 If your Goravel app runs inside Docker, configure `goravel.artisan.command` in `.vscode/settings.json`:
@@ -255,11 +291,23 @@ npm install
 # Build Go LSP server (outputs to bin/goravel-lsp) and bundle TS client
 npm run build
 
-# Run Go server tests and TypeScript typecheck
-npm run test:server
-npm run typecheck
+# Run the complete test suite (Go server, TypeScript client, config/resources, install.sh & action.yml)
+npm test
 
-# Package .vsix into dist/
+# Run individual test and quality-check commands
+npm run test:server        # Go unit & integration tests
+npm run test:server:race   # Go tests with race detector
+npm run test:server:cover  # Go tests with coverage summary
+npm run vet:server         # Go static analysis (go vet)
+npm run test:client        # TypeScript client & extension resource tests
+npm run test:client:cover  # TypeScript client tests with V8 coverage
+npm run test:scripts       # install.sh & action.yml automated tests
+npm run typecheck          # TypeScript strict type checking (src + test)
+
+# Run Go fuzz tests (optional)
+cd server && go test -run=^$ -fuzz=FuzzCheckSQLSyntax -fuzztime=10s ./internal/rawsql
+
+# Package .vsix into dist/ (runs typecheck, go vet, race tests, client & script tests)
 npm run package
 ```
 
