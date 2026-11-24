@@ -2,6 +2,8 @@
 
 Rich IDE tooling, Language Server (`goravel-lsp`), Raw SQL & ORM intelligence, Go HTML Template (`.tmpl` / `.gohtml`) support, Workspace Explorers, and Artisan CLI integration for [Goravel](https://www.goravel.dev/) projects.
 
+📖 **Documentation:** [https://rusmanplatd.github.io/goravel-vscode-extension/](https://rusmanplatd.github.io/goravel-vscode-extension/)
+
 ## Features
 
 ### Go & Raw SQL Intelligence (`goravel-lsp`)
@@ -315,7 +317,16 @@ npm run package
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes across all git tags.
 
+## Author & Links
+
+- **Email**: [rusmanplatd@gmail.com](mailto:rusmanplatd@gmail.com)
+- **Website**: [https://rusmanplatd.id](https://rusmanplatd.id)
+- **Instagram**: [https://instagram.com/rusmanplatd](https://instagram.com/rusmanplatd)
+- **LinkedIn**: [https://linkedin.com/in/rusmanplatd](https://linkedin.com/in/rusmanplatd)
+- **Twitter / X**: [https://twitter.com/rusmanplatd](https://twitter.com/rusmanplatd)
+- **Documentation**: [https://rusmanplatd.github.io/goravel-vscode-extension/](https://rusmanplatd.github.io/goravel-vscode-extension/)
+
 ## License
 
-[MIT](LICENSE) © 2026 rusmanplatd
+[MIT](LICENSE) © 2026 [rusmanplatd](https://rusmanplatd.id)
 

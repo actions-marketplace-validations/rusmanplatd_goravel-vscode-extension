@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Goravel for VS Code — Documentation</title>
+  <meta name="description" content="Rich IDE tooling, Language Server (goravel-lsp), Raw SQL & ORM intelligence, Go HTML Template (.tmpl / .gohtml) support, Workspace Explorers, and Artisan CLI integration for Goravel projects." />
+  <link rel="icon" type="image/svg+xml" href="assets/goravel.svg" />
+  <style>
+    :root {
+      --bg: #0b1120;
+      --bg-elevated: #111827;
+      --bg-card: #161f33;
+      --bg-code: #0d1526;
+      --border: #1e293b;
+      --border-strong: #334155;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --text-heading: #f8fafc;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, 0.12);
+      --accent-2: #818cf8;
+      --success: #34d399;
+      --sidebar-w: 270px;
+      --header-h: 64px;
+      --radius: 10px;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Top Navbar */
+    .topbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: var(--header-h);
+      background: rgba(11, 17, 32, 0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--text-heading);
+      font-weight: 700;
+      font-size: 1.05rem;
+      letter-spacing: -0.01em;
+    }
+    .brand:hover { text-decoration: none; }
+    .brand img { width: 28px; height: 28px; }
+    .version-badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .topbar-link {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      transition: color 0.15s;
+    }
+    .topbar-link:hover { color: var(--text-heading); text-decoration: none; }
+
+    .menu-toggle {
+      display: none;
+      background: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+
+    /* Layout */
+    .layout {
+      display: flex;
+      padding-top: var(--header-h);
+      min-height: 100vh;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      position: fixed;
+      top: var(--header-h);
+      left: 0;
+      bottom: 0;
+      width: var(--sidebar-w);
+      background: var(--bg-elevated);
+      border-right: 1px solid var(--border);
+      padding: 24px 16px;
+      overflow-y: auto;
+      z-index: 40;
+    }
+
+    .nav-group { margin-bottom: 22px; }
+    .nav-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      padding: 0 10px 8px;
+    }
+    .nav-list { list-style: none; margin: 0; padding: 0; }
+    .nav-list a {
+      display: block;
+      padding: 6px 10px;
+      border-radius: 7px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .nav-list a:hover {
+      background: var(--bg-card);
+      color: var(--text-heading);
+      text-decoration: none;
+    }
+    .nav-list a.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    /* Main Content */
+    .main {
+      margin-left: var(--sidebar-w);
+      flex: 1;
+      min-width: 0;
+      padding: 40px 48px 80px;
+      max-width: 1020px;
+    }
+
+    /* Hero */
+    .hero {
+      padding: 32px;
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.08), rgba(129, 140, 248, 0.08));
+      border: 1px solid var(--border-strong);
+      border-radius: 16px;
+      margin-bottom: 40px;
+    }
+    .hero h1 {
+      margin: 0 0 12px;
+      font-size: 2.2rem;
+      line-height: 1.2;
+      color: var(--text-heading);
+      letter-spacing: -0.02em;
+    }
+    .hero p {
+      margin: 0 0 22px;
+      font-size: 1.05rem;
+      color: var(--text-muted);
+      max-width: 720px;
+    }
+    .hero-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 18px;
+      border-radius: 9px;
+      font-weight: 600;
+      font-size: 0.92rem;
+      transition: transform 0.12s, background 0.15s;
+    }
+    .btn:hover { text-decoration: none; transform: translateY(-1px); }
+    .btn-primary { background: var(--accent); color: #082f49; }
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text-heading);
+      border: 1px solid var(--border-strong);
+    }
+
+    /* Typography & Sections */
+    section {
+      margin-bottom: 48px;
+      scroll-margin-top: calc(var(--header-h) + 24px);
+    }
+    h2 {
+      font-size: 1.55rem;
+      color: var(--text-heading);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin: 0 0 20px;
+      letter-spacing: -0.015em;
+    }
+    h3 {
+      font-size: 1.15rem;
+      color: var(--text-heading);
+      margin: 26px 0 10px;
+      scroll-margin-top: calc(var(--header-h) + 24px);
+    }
+    p { margin: 0 0 14px; }
+    ul { padding-left: 22px; margin: 0 0 16px; }
+    li { margin-bottom: 6px; }
+
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.86em;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #7dd3fc;
+    }
+
+    .code-wrap {
+      position: relative;
+      margin: 14px 0 22px;
+    }
+    pre {
+      margin: 0;
+      background: var(--bg-code);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 0.86rem;
+      line-height: 1.55;
+      color: #e2e8f0;
+    }
+    pre code {
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: inherit;
+      font-size: inherit;
+    }
+    .copy-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .copy-btn:hover { color: var(--text-heading); border-color: var(--accent); }
+    .copy-btn.copied { color: var(--success); border-color: var(--success); }
+
+    /* Feature Grid */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      margin: 18px 0 24px;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+    }
+    .card h4 {
+      margin: 0 0 8px;
+      color: var(--text-heading);
+      font-size: 1rem;
+    }
+    .card p {
+      margin: 0;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    /* Tables */
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      margin: 16px 0 24px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th {
+      background: var(--bg-elevated);
+      color: var(--text-heading);
+      font-weight: 600;
+    }
+    tr:last-child td { border-bottom: none; }
+
+    /* Author & Social Links */
+    .social-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .social-card {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 14px 16px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      transition: border-color 0.15s, transform 0.12s;
+    }
+    .social-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      text-decoration: none;
+    }
+    .social-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      font-weight: 700;
+    }
+    .social-value {
+      color: var(--text-heading);
+      font-weight: 600;
+      font-size: 0.92rem;
+      word-break: break-all;
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding-top: 24px;
+      margin-top: 48px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+    }
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      .menu-toggle { display: inline-flex; }
+      .sidebar {
+        transform: translateX(-100%);
+        transition: transform 0.2s ease;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .main {
+        margin-left: 0;
+        padding: 28px 20px 64px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#top">
+      <img src="assets/goravel.svg" alt="Goravel Logo" />
+      <span>Goravel for VS Code</span>
+      <span class="version-badge">v1.0.0</span>
+    </a>
+    <div class="topbar-actions">
+      <a class="topbar-link" href="https://github.com/rusmanplatd/goravel-vscode-extension" target="_blank" rel="noopener">GitHub</a>
+      <a class="topbar-link" href="https://rusmanplatd.id" target="_blank" rel="noopener">rusmanplatd.id</a>
+      <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation">Menu</button>
+    </div>
+  </header>
+
+  <div class="layout" id="top">
+    <aside class="sidebar" id="sidebar">
+      <div class="nav-group">
+        <div class="nav-title">Getting Started</div>
+        <ul class="nav-list">
+          <li><a href="#overview">Overview</a></li>
+          <li><a href="#features">Features</a></li>
+          <li><a href="#installation">Installation</a></li>
+          <li><a href="#cli-flags">CLI Flags</a></li>
+        </ul>
+      </div>
+      <div class="nav-group">
+        <div class="nav-title">Guides &amp; Examples</div>
+        <ul class="nav-list">
+          <li><a href="#ex-raw-sql">Raw SQL &amp; CTEs</a></li>
+          <li><a href="#ex-orm">ORM, Config &amp; Rules</a></li>
+          <li><a href="#ex-templates">Views &amp; Templates</a></li>
+          <li><a href="#ex-snippets">Code Snippets</a></li>
+          <li><a href="#ex-cli">CLI Usage</a></li>
+          <li><a href="#ex-ci">GitHub Actions CI</a></li>
+          <li><a href="#ex-docker">Docker &amp; Artisan</a></li>
+        </ul>
+      </div>
+      <div class="nav-group">
+        <div class="nav-title">Reference</div>
+        <ul class="nav-list">
+          <li><a href="#settings">Extension Settings</a></li>
+          <li><a href="#development">Development</a></li>
+          <li><a href="#author">Author &amp; Links</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="hero" id="overview">
+        <h1>Goravel for VS Code (<code>goravel-vscode</code>)</h1>
+        <p>
+          Rich IDE tooling, Language Server (<code>goravel-lsp</code>), Raw SQL &amp; ORM intelligence,
+          Go HTML Template (<code>.tmpl</code> / <code>.gohtml</code>) support, Workspace Explorers,
+          and Artisan CLI integration for <a href="https://www.goravel.dev/" target="_blank" rel="noopener">Goravel</a> projects.
+        </p>
+        <div class="hero-buttons">
+          <a class="btn btn-primary" href="#installation">Get Started</a>
+          <a class="btn btn-secondary" href="https://github.com/rusmanplatd/goravel-vscode-extension" target="_blank" rel="noopener">View on GitHub</a>
+          <a class="btn btn-secondary" href="https://github.com/rusmanplatd/goravel-vscode-extension/blob/master/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+        </div>
+      </div>
+
+      <section id="features">
+        <h2>Features</h2>
+        <div class="grid">
+          <div class="card">
+            <h4>Go &amp; Raw SQL Intelligence</h4>
+            <p>TextMate SQL highlighting inside Go strings, schema-aware validation for tables, columns, aliases, CTEs, subqueries, and optional live DB introspection via <code>.env</code> <code>DB_*</code>.</p>
+          </div>
+          <div class="card">
+            <h4>ORM &amp; Framework Intelligence</h4>
+            <p>Model, relationship, config, route (including gRPC), observer, validation rule, and migration indexing, plus <code>facades.View</code> linking to templates.</p>
+          </div>
+          <div class="card">
+            <h4>Goravel Template Support</h4>
+            <p>Syntax highlighting, language configuration, LSP hover with span tracking, detailed type resolution, and snippets for <code>.tmpl</code> and <code>.gohtml</code> files.</p>
+          </div>
+          <div class="card">
+            <h4>Activity Bar Explorer</h4>
+            <p>Browse Models &amp; Schema (with ER Diagram &amp; row preview), Routes (Route Matrix &amp; request tester), Views, Migrations, Commands, Seeders &amp; Schedules.</p>
+          </div>
+        </div>
+        <ul>
+          <li><strong>Artisan CLI &amp; Productivity</strong>: Explorer context menus for <code>app/models</code>, <code>app/http/controllers</code>, <code>database/migrations</code>, <code>resources/views</code>, and more.</li>
+          <li><strong>Command Palette</strong>: Run <code>make:*</code> generators, <code>migrate</code>, <code>migrate:rollback</code>, <code>db:seed</code>, Go tests, and open <code>storage/logs/goravel.log</code>.</li>
+        </ul>
+      </section>
+
+      <section id="installation">
+        <h2>Installation</h2>
+
+        <h3>VS Code Extension</h3>
+        <p>Install <strong>Goravel</strong> (<code>rusmanplatd.goravel-vscode</code>) from the VS Code Marketplace or Open VSX Registry, or install from a <code>.vsix</code> package:</p>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>code --install-extension goravel-vscode-1.0.0.vsix</code></pre>
+        </div>
+        <p>The extension activates automatically when your workspace contains <code>artisan</code>, <code>app/models</code>, or when opening a <code>.tmpl</code> / <code>.gohtml</code> file (requires VS Code <code>^1.85.0</code>).</p>
+
+        <h3>Standalone <code>goravel-lsp</code> CLI</h3>
+        <p>Install the standalone <code>goravel-lsp</code> binary using <code>install.sh</code>:</p>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>curl -sSfL https://raw.githubusercontent.com/rusmanplatd/goravel-vscode-extension/master/install.sh | sh -s -- -b /usr/local/bin</code></pre>
+        </div>
+        <p>Or run it directly against a Goravel project:</p>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>goravel-lsp --check-sql .
+goravel-lsp --check-templates .
+goravel-lsp --dump .</code></pre>
+        </div>
+
+        <h3 id="cli-flags">Available CLI Flags</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Flag</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>--only-sql</code> / <code>--sql</code> / <code>--check-sql</code></td><td>Check only SQL and ORM database queries</td></tr>
+              <tr><td><code>--only-templates</code> / <code>--templates</code> / <code>--check-templates</code></td><td>Check only Go HTML templates (<code>.tmpl</code> / <code>.gohtml</code>) and <code>View()</code> variable references</td></tr>
+              <tr><td><code>--all</code></td><td>Run all diagnostics (SQL, ORM, framework, and templates)</td></tr>
+              <tr><td><code>--errors-only</code></td><td>Report errors only</td></tr>
+              <tr><td><code>--sql-source=&lt;auto|model|live-db|both&gt;</code></td><td>Schema source: <code>model</code> (Go models/migrations), <code>live-db</code> (<code>.env</code> <code>DB_*</code>), <code>both</code> (merged), <code>auto</code></td></tr>
+              <tr><td><code>--live-db</code></td><td>Shorthand for <code>--sql-source=live-db</code></td></tr>
+              <tr><td><code>--out-format=github-actions</code></td><td>Format output for GitHub Actions annotations</td></tr>
+              <tr><td><code>--skip-dirs=dir1,dir2</code></td><td>Comma-separated directories to skip</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>GitHub Action</h3>
+        <p>Use <code>goravel-lsp</code> in CI workflows via <code>action.yml</code>:</p>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>- uses: rusmanplatd/goravel-vscode-extension@v1.0.0
+  with:
+    version: "v1.0.0"        # 'latest', tag (e.g. 'v1.0.0'), or 'master'
+    working-directory: "."
+    args: "--check-sql"      # or '--check-templates', '--check-sql --check-templates', '--check --all'
+    only-sql: "true"
+    only-templates: "false"</code></pre>
+        </div>
+      </section>
+
+      <section id="examples">
+        <h2>Examples</h2>
+
+        <h3 id="ex-raw-sql">1. Raw SQL, Table Variables, CTEs &amp; Scan Struct Validation</h3>
+        <p><code>goravel-lsp</code> highlights SQL inside Go strings, resolves <code>TableName()</code> variables, validates columns/aliases/CTEs against models and migrations, and checks scan struct fields and placeholders:</p>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>userTable := (models.User{}).TableName()
+roleTable := (models.Role{}).TableName()
+
+query := `
+	WITH active_users AS (
+		SELECT u.id, u.email, r.name AS role_name
+		FROM ` + userTable + ` u
+		LEFT JOIN ` + roleTable + ` r ON r.id = u.role_id
+		WHERE u.deleted_at IS NULL
+	)
+	SELECT id, email, role_name
+	FROM active_users
+	WHERE email ILIKE $1
+`
+
+var rows []UserSummaryRow
+err := facades.Orm().Query().Raw(query, "%@example.com").Scan(&amp;rows)</code></pre>
+        </div>
+
+        <h3 id="ex-orm">2. ORM Query Builder, Config &amp; Validation Rules</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>// ORM Query Builder column &amp; relation intelligence
+var users []models.User
+err := facades.Orm().Query().
+	With("Role").
+	Where("status = ?", "active").
+	OrderBy("created_at", "desc").
+	Find(&amp;users)
+
+// Config key completion &amp; go-to-definition (indexes config/*.go)
+appName := facades.Config().GetString("app.name")
+
+// Validation rule intelligence in Form Requests (indexes app/rules/*.go)
+func (r *CreateUserRequest) Rules(ctx http.Context) map[string]string {
+	return map[string]string{
+		"email": "required|email|max:255",
+		"code":  "required|alpha_dash",
+	}
+}</code></pre>
+        </div>
+
+        <h3 id="ex-templates">3. <code>facades.View</code> &amp; <code>.tmpl</code> / <code>.gohtml</code> Template Intelligence</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>// In app/http/controllers/user_controller.go
+return ctx.Response().View().Make("users/index.tmpl", map[string]any{
+	"title": "Users",
+	"users": users,
+})</code></pre>
+        </div>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>&lt;!-- In resources/views/users/index.tmpl --&gt;
+{{ define "users/index.tmpl" }}
+  {{ template "layouts/header.tmpl" . }}
+  &lt;h1&gt;{{ .title }}&lt;/h1&gt;
+  &lt;ul&gt;
+    {{ range $index, $user := .users }}
+      &lt;li&gt;{{ $user.Email }}&lt;/li&gt;
+    {{ end }}
+  &lt;/ul&gt;
+{{ end }}</code></pre>
+        </div>
+
+        <h3 id="ex-snippets">4. Built-in Code Snippets</h3>
+        <ul>
+          <li><strong>Go (<code>snippets/goravel.code-snippets</code>)</strong>: <code>gctrl</code> (Controller), <code>greq</code> (Form Request), <code>gmodel</code> (ORM Model)</li>
+          <li><strong>Templates (<code>snippets/goravel-tmpl.code-snippets</code>)</strong>: <code>gdefine</code>, <code>gtemplate</code>, <code>gblock</code>, <code>gif</code>, <code>gifelse</code>, <code>grange</code></li>
+        </ul>
+
+        <h3 id="ex-cli">5. <code>goravel-lsp</code> CLI Usage</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code># Print indexed tables, columns, relations, routes, configs, rules, and migrations
+goravel-lsp --dump .
+
+# Check only SQL and ORM queries (using Go models &amp; migrations)
+goravel-lsp --check-sql --sql-source=model .
+
+# Check SQL queries against live database introspection (.env DB_* settings)
+goravel-lsp --check-sql --sql-source=live-db .
+
+# Check only Go HTML template variables, syntax, includes, and View() calls
+goravel-lsp --check-templates .
+
+# Check everything (SQL, ORM, routes, configs, views, templates) and report errors only
+goravel-lsp check --all --errors-only .</code></pre>
+        </div>
+
+        <h3 id="ex-ci">6. GitHub Actions CI Workflow</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>name: Goravel SQL &amp; ORM Lint
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: rusmanplatd/goravel-vscode-extension@v1.0.0
+        with:
+          version: "v1.0.0"
+          working-directory: "."
+          args: "--check-sql --errors-only --sql-source=model"
+          only-sql: "true"</code></pre>
+        </div>
+
+        <h3 id="ex-docker">7. Docker / Custom Artisan Command Setting</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>{
+  "goravel.artisan.command": "docker compose exec -T app go run . artisan",
+  "goravel.sql.liveIntrospection": true
+}</code></pre>
+        </div>
+      </section>
+
+      <section id="settings">
+        <h2>Extension Settings</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>goravel.server.path</code></td><td><code>""</code></td><td>Path to the <code>goravel-lsp</code> binary. Defaults to the bundled <code>bin/goravel-lsp</code>.</td></tr>
+              <tr><td><code>goravel.sql.enable</code></td><td><code>true</code></td><td>Enable Goravel Raw SQL and Framework intelligence inside Go files.</td></tr>
+              <tr><td><code>goravel.sql.liveIntrospection</code></td><td><code>false</code></td><td>Enable optional live database schema introspection using <code>.env</code> <code>DB_*</code> settings.</td></tr>
+              <tr><td><code>goravel.sql.source</code></td><td><code>"auto"</code></td><td>Schema source: <code>"auto"</code>, <code>"model"</code>, <code>"live-db"</code>, or <code>"both"</code>.</td></tr>
+              <tr><td><code>goravel.artisan.command</code></td><td><code>"go run . artisan"</code></td><td>Base Artisan CLI command prefix (e.g. <code>go run . artisan</code>, <code>./artisan</code>, or Docker).</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="development">
+        <h2>Development</h2>
+        <div class="code-wrap">
+          <button class="copy-btn" data-copy>Copy</button>
+          <pre><code>npm install               # Install Node dependencies
+npm run build             # Build Go LSP server and bundle TS client
+npm test                  # Run Go, TypeScript client, and script tests
+npm run test:server:race  # Go tests with race detector
+npm run vet:server        # Go static analysis
+npm run typecheck         # TypeScript strict type checking
+npm run package           # Package .vsix into dist/</code></pre>
+        </div>
+      </section>
+
+      <section id="author">
+        <h2>Author &amp; Links</h2>
+        <p>Maintained by <strong>rusmanplatd</strong>. Connect or reach out via any of the channels below:</p>
+        <div class="social-grid">
+          <a class="social-card" href="mailto:rusmanplatd@gmail.com">
+            <span class="social-label">Email</span>
+            <span class="social-value">rusmanplatd@gmail.com</span>
+          </a>
+          <a class="social-card" href="https://rusmanplatd.id" target="_blank" rel="noopener">
+            <span class="social-label">Website</span>
+            <span class="social-value">https://rusmanplatd.id</span>
+          </a>
+          <a class="social-card" href="https://instagram.com/rusmanplatd" target="_blank" rel="noopener">
+            <span class="social-label">Instagram</span>
+            <span class="social-value">instagram.com/rusmanplatd</span>
+          </a>
+          <a class="social-card" href="https://linkedin.com/in/rusmanplatd" target="_blank" rel="noopener">
+            <span class="social-label">LinkedIn</span>
+            <span class="social-value">linkedin.com/in/rusmanplatd</span>
+          </a>
+          <a class="social-card" href="https://twitter.com/rusmanplatd" target="_blank" rel="noopener">
+            <span class="social-label">Twitter / X</span>
+            <span class="social-value">twitter.com/rusmanplatd</span>
+          </a>
+          <a class="social-card" href="https://github.com/rusmanplatd/goravel-vscode-extension" target="_blank" rel="noopener">
+            <span class="social-label">GitHub</span>
+            <span class="social-value">rusmanplatd/goravel-vscode-extension</span>
+          </a>
+        </div>
+      </section>
+
+      <footer>
+        <div>MIT License &copy; 2026 <a href="https://rusmanplatd.id" target="_blank" rel="noopener">rusmanplatd</a></div>
+        <div class="footer-links">
+          <a href="mailto:rusmanplatd@gmail.com">Email</a>
+          <a href="https://rusmanplatd.id" target="_blank" rel="noopener">Web</a>
+          <a href="https://instagram.com/rusmanplatd" target="_blank" rel="noopener">Instagram</a>
+          <a href="https://linkedin.com/in/rusmanplatd" target="_blank" rel="noopener">LinkedIn</a>
+          <a href="https://twitter.com/rusmanplatd" target="_blank" rel="noopener">X / Twitter</a>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    const menuToggle = document.getElementById("menuToggle");
+    const sidebar = document.getElementById("sidebar");
+    menuToggle.addEventListener("click", () => sidebar.classList.toggle("open"));
+    sidebar.querySelectorAll("a").forEach((link) => {
+      link.addEventListener("click", () => sidebar.classList.remove("open"));
+    });
+
+    // Copy buttons for code blocks
+    document.querySelectorAll("[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const code = btn.parentElement.querySelector("pre code")?.textContent || "";
+        try {
+          await navigator.clipboard.writeText(code);
+          btn.textContent = "Copied!";
+          btn.classList.add("copied");
+          setTimeout(() => {
+            btn.textContent = "Copy";
+            btn.classList.remove("copied");
+          }, 1600);
+        } catch {
+          btn.textContent = "Error";
+        }
+      });
+    });
+
+    // Highlight active sidebar link on scroll
+    const navLinks = Array.from(document.querySelectorAll(".nav-list a"));
+    const sections = navLinks
+      .map((a) => document.querySelector(a.getAttribute("href")))
+      .filter(Boolean);
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            navLinks.forEach((a) => a.classList.remove("active"));
+            const active = navLinks.find((a) => a.getAttribute("href") === "#" + entry.target.id);
+            if (active) active.classList.add("active");
+          }
+        });
+      },
+      { rootMargin: "-20% 0px -70% 0px" }
+    );
+    sections.forEach((sec) => observer.observe(sec));
+  </script>
+</body>
+</html>
